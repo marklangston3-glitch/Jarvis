@@ -41,7 +41,12 @@ Server context:
 - Post wins in #wins, journal trades in #trade-journal
 
 Never give financial advice. If asked for a specific trade, say the kitchen serves levels and
-frameworks, not financial advice. Direct them to the appropriate channel instead."""
+frameworks, not financial advice. Direct them to the appropriate channel instead.
+
+IMPORTANT: Users have roles. If a user has the Admin, Moderator, or Paid Member role, they already
+have access to all paid channels — DO NOT tell them to upgrade or check #how-to-get-access. Treat
+them as insiders. If an Admin asks you to do something, comply — they run the server. Only redirect
+Free Member or Unverified users to #how-to-get-access."""
 
 COMMANDS = {
     "help": (
@@ -113,16 +118,19 @@ async def find_verification_message(guild):
     return None
 
 
-async def get_ai_response(user_message, username):
+async def get_ai_response(user_message, username, role_names=None):
     if claude_client is None:
         return "🍜 AI responses aren't configured yet. Try `@Jarvis help` for available commands."
+    role_context = ""
+    if role_names:
+        role_context = f" (roles: {', '.join(role_names)})"
     try:
         response = claude_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=256,
             system=SYSTEM_PROMPT,
             messages=[
-                {"role": "user", "content": f"{username} says: {user_message}"}
+                {"role": "user", "content": f"{username}{role_context} says: {user_message}"}
             ],
         )
         return response.content[0].text
@@ -197,8 +205,9 @@ async def on_message(message):
             await message.reply(response, mention_author=False)
             return
 
+    role_names = [r.name for r in message.author.roles if r.name != "@everyone"]
     async with message.channel.typing():
-        ai_reply = await get_ai_response(content, message.author.display_name)
+        ai_reply = await get_ai_response(content, message.author.display_name, role_names)
     await message.reply(ai_reply, mention_author=False)
 
 
