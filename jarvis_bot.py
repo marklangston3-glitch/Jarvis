@@ -841,20 +841,27 @@ async def on_message(message):
 
     parts = content_lower.split(None, 1)
     cmd_name = parts[0] if parts else ""
-    cmd_args = parts[1].upper() if len(parts) > 1 else ""
+    cmd_args = re.sub(r"[\[\](){}]", "", parts[1]).strip().upper() if len(parts) > 1 else ""
 
     if cmd_name in MARKET_COMMANDS:
-        async with message.channel.typing():
-            result = await asyncio.to_thread(MARKET_COMMANDS[cmd_name], cmd_args)
-        if len(result) > 2000:
-            result = result[:1997] + "..."
-        await message.reply(result, mention_author=False)
+        try:
+            async with message.channel.typing():
+                result = await asyncio.to_thread(MARKET_COMMANDS[cmd_name], cmd_args)
+            if len(result) > 2000:
+                result = result[:1997] + "..."
+            await message.reply(result, mention_author=False)
+        except Exception as e:
+            print(f"Command error: {e}")
+            await message.reply(f"❌ Something went wrong running that command.", mention_author=False)
         return
 
     role_names = [r.name for r in message.author.roles if r.name != "@everyone"]
-    async with message.channel.typing():
-        ai_reply = await get_ai_response(content, message.author.display_name, role_names)
-    await message.reply(ai_reply, mention_author=False)
+    try:
+        async with message.channel.typing():
+            ai_reply = await get_ai_response(content, message.author.display_name, role_names)
+        await message.reply(ai_reply, mention_author=False)
+    except Exception as e:
+        print(f"Reply error: {e}")
 
 
 if __name__ == "__main__":
