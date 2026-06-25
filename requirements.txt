@@ -1,1 +1,2 @@
 discord.py==2.7.1
+anthropic>=0.52.0
