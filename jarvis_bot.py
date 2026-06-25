@@ -63,6 +63,7 @@ HELP_TEXT = (
     "• `@Jarvis price SPY` — live quote + daily change\n"
     "• `@Jarvis technicals SPY` — RSI, MACD, SMAs, VWAP\n"
     "• `@Jarvis options SPY` — options chain snapshot\n"
+    "• `@Jarvis options movers` — top 10 most active contracts market-wide\n"
     "• `@Jarvis levels SPY` — key support/resistance levels\n"
     "• `@Jarvis earnings AAPL` — next earnings + recent EPS\n"
     "• `@Jarvis news AAPL` — latest headlines\n"
@@ -574,6 +575,53 @@ def cmd_fear():
         return f"❌ Error fetching Fear & Greed Index: {e}"
 
 
+def cmd_options_movers():
+    try:
+        tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD", "SPY", "QQQ",
+                    "NFLX", "COIN", "SOFI", "PLTR", "NIO", "RIVN", "MARA", "SQ", "ROKU",
+                    "SNAP", "UBER", "CRWD", "NET", "DKNG", "RBLX", "HOOD", "UPST",
+                    "IWM", "DIA", "BABA", "BAC", "F", "T", "INTC", "PYPL", "DIS"]
+        all_contracts = []
+        for ticker in tickers:
+            try:
+                t = yf.Ticker(ticker)
+                dates = t.options
+                if not dates:
+                    continue
+                chain = t.option_chain(dates[0])
+                for _, r in chain.calls.iterrows():
+                    vol = r.get("volume", 0) or 0
+                    if vol > 0:
+                        iv = r.get("impliedVolatility", 0) or 0
+                        oi = r.get("openInterest", 0) or 0
+                        all_contracts.append((ticker, f"${r['strike']:.0f}C", dates[0], int(vol), int(oi), iv, r.get("lastPrice", 0)))
+                for _, r in chain.puts.iterrows():
+                    vol = r.get("volume", 0) or 0
+                    if vol > 0:
+                        iv = r.get("impliedVolatility", 0) or 0
+                        oi = r.get("openInterest", 0) or 0
+                        all_contracts.append((ticker, f"${r['strike']:.0f}P", dates[0], int(vol), int(oi), iv, r.get("lastPrice", 0)))
+            except Exception:
+                continue
+
+        all_contracts.sort(key=lambda x: x[3], reverse=True)
+        top = all_contracts[:10]
+
+        if not top:
+            return "❌ Couldn't fetch options flow data right now."
+
+        lines = ["🔥 **Top 10 Most Active Options Contracts**\n"]
+        for i, (ticker, strike, exp, vol, oi, iv, price) in enumerate(top, 1):
+            lines.append(
+                f"**{i}.** **{ticker}** {strike} (exp {exp})\n"
+                f"   Vol: {vol:,} | OI: {oi:,} | IV: {iv * 100:.0f}% | Last: {fmt(price)}"
+            )
+        lines.append("\n*Scanned nearest expiration across 35+ tickers*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Error fetching options movers: {e}"
+
+
 def cmd_movers():
     try:
         tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD", "SPY", "QQQ",
@@ -704,8 +752,8 @@ MARKET_COMMANDS = {
     "price": lambda args: cmd_price(args) if args else "Usage: `@Jarvis price SPY`",
     "technicals": lambda args: cmd_technicals(args) if args else "Usage: `@Jarvis technicals SPY`",
     "ta": lambda args: cmd_technicals(args) if args else "Usage: `@Jarvis ta SPY`",
-    "options": lambda args: cmd_options(args) if args else "Usage: `@Jarvis options SPY`",
-    "flow": lambda args: cmd_options(args) if args else "Usage: `@Jarvis flow SPY`",
+    "options": lambda args: cmd_options_movers() if args and args.lower() == "movers" else cmd_options(args) if args else "Usage: `@Jarvis options SPY` or `@Jarvis options movers`",
+    "flow": lambda args: cmd_options_movers() if args and args.lower() == "movers" else cmd_options(args) if args else "Usage: `@Jarvis flow SPY` or `@Jarvis flow movers`",
     "levels": lambda args: cmd_levels(args) if args else "Usage: `@Jarvis levels SPY`",
     "earnings": lambda args: cmd_earnings(args) if args else "Usage: `@Jarvis earnings AAPL`",
     "news": lambda args: cmd_news(args) if args else "Usage: `@Jarvis news AAPL`",
