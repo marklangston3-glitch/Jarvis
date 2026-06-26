@@ -77,7 +77,8 @@ HELP_TEXT = (
     "• `@Jarvis rules` — server rules\n"
     "• `@Jarvis access` — how to get paid access\n"
     "• `@Jarvis channels` — channel guide\n"
-    "• `@Jarvis gm` — morning check-in\n\n"
+    "• `@Jarvis gm` — morning check-in\n"
+    "• `@Jarvis disclaimer` — financial disclaimer\n\n"
     "Or just talk to me — I'm powered by AI. 🍜"
 )
 
@@ -118,6 +119,20 @@ STATIC_COMMANDS = {
         "• #q-and-a — ask questions 🍜"
     ),
     "gm": "☀️ GM! Markets are open, the kitchen is hot. Let's eat. 🍜👑",
+    "disclaimer": (
+        "⚠️ **DISCLAIMER — The Soup Kitchen**\n\n"
+        "Nothing in this server constitutes financial advice. All market data, trade ideas, "
+        "levels, alerts, and commentary shared here — by members, moderators, or Jarvis — "
+        "are for **educational and informational purposes only**.\n\n"
+        "• We are **not** licensed financial advisors.\n"
+        "• Past performance does **not** guarantee future results.\n"
+        "• You are solely responsible for your own trading decisions.\n"
+        "• Always do your own research (DYOR) before entering any trade.\n"
+        "• Never risk more than you can afford to lose.\n\n"
+        "By participating in this server, you acknowledge that you trade **at your own risk**. "
+        "The Soup Kitchen and its staff are not liable for any financial losses.\n\n"
+        "Trade smart. Manage risk. The kitchen feeds those who feed themselves. 🍜"
+    ),
 }
 
 intents = discord.Intents.default()
