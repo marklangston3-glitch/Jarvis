@@ -12,17 +12,22 @@ Features:
 import asyncio
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import anthropic
 import discord
+from discord.ext import tasks
 import requests as http_requests
 import yfinance as yf
+
+ET = ZoneInfo("America/New_York")
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GUILD_ID = 1513190467796336830
 RULES_CHANNEL_NAME = "rules"
+DAILY_CHANNEL_NAME = "daily-levels"
 VERIFY_EMOJI = "✅"
 FREE_MEMBER_ROLE = "Free Member"
 UNVERIFIED_ROLE = "Unverified"
@@ -72,7 +77,9 @@ HELP_TEXT = (
     "• `@Jarvis sectors` — sector performance\n"
     "• `@Jarvis crypto BTC` — crypto price\n"
     "• `@Jarvis fear` — Fear & Greed Index\n"
-    "• `@Jarvis market` — market overview (SPY, QQQ, VIX)\n\n"
+    "• `@Jarvis market` — market overview (SPY, QQQ, VIX)\n"
+    "• `@Jarvis calendar` — today's US economic events\n"
+    "• `@Jarvis prep` — full morning market prep\n\n"
     "**🛠️ Server:**\n"
     "• `@Jarvis rules` — server rules\n"
     "• `@Jarvis access` — how to get paid access\n"
@@ -728,6 +735,192 @@ def cmd_market():
         return f"❌ Error fetching market overview: {e}"
 
 
+# ─── ECONOMIC CALENDAR ───
+
+
+def fetch_economic_calendar():
+    try:
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        url = f"https://api.tradingeconomics.com/calendar/country/United%20States/{today}/{today}"
+        resp = http_requests.get(url, params={"c": "guest:guest", "f": "json"}, timeout=15)
+        if resp.status_code != 200:
+            return None
+        events = resp.json()
+        if not events:
+            return None
+        important = []
+        for ev in events:
+            name = ev.get("Event", "").replace("United States ", "")
+            te_time = ev.get("Date", "")
+            actual = ev.get("Actual", "")
+            forecast = ev.get("Forecast", "")
+            previous = ev.get("Previous", "")
+            importance = ev.get("Importance", 0)
+            if importance and importance >= 2:
+                time_str = ""
+                if te_time:
+                    try:
+                        dt = datetime.fromisoformat(te_time.replace("Z", "+00:00"))
+                        time_str = dt.astimezone(ET).strftime("%I:%M %p")
+                    except Exception:
+                        pass
+                actual_str = str(actual) if actual not in (None, "", "None") else "—"
+                forecast_str = str(forecast) if forecast not in (None, "", "None") else "—"
+                prev_str = str(previous) if previous not in (None, "", "None") else "—"
+                important.append((time_str, name, actual_str, forecast_str, prev_str))
+        return important
+    except Exception:
+        return None
+
+
+def cmd_calendar():
+    events = fetch_economic_calendar()
+    if not events:
+        return "📅 No major US economic events scheduled for today."
+    lines = [f"📅 **US Economic Calendar — {datetime.now(ET).strftime('%b %d, %Y')}**\n"]
+    for t, name, actual, forecast, prev in events:
+        time_part = f"**{t}** — " if t else ""
+        result = ""
+        if actual != "—":
+            result = f" → **{actual}**"
+            if forecast != "—":
+                try:
+                    a = float(actual.replace("%", "").replace("K", "").replace("M", "").replace("B", ""))
+                    f = float(forecast.replace("%", "").replace("K", "").replace("M", "").replace("B", ""))
+                    result += " ✅" if a >= f else " ❌"
+                except Exception:
+                    pass
+        lines.append(
+            f"• {time_part}**{name}**\n"
+            f"  Forecast: {forecast} | Previous: {prev}{result}"
+        )
+    return "\n".join(lines)
+
+
+# ─── DAILY MARKET PREP ───
+
+
+def build_market_prep():
+    now = datetime.now(ET)
+    lines = [f"☀️ **Good Morning, Kitchen — {now.strftime('%A, %b %d, %Y')}**\n"]
+
+    # Index futures / pre-market
+    lines.append("**🌍 Index Check:**")
+    try:
+        index_tickers = {
+            "SPY": "S&P 500", "QQQ": "Nasdaq 100", "DIA": "Dow Jones",
+            "IWM": "Russell 2000",
+        }
+        for ticker, name in index_tickers.items():
+            t = yf.Ticker(ticker)
+            info = t.info
+            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
+            pre_price = info.get("preMarketPrice")
+            if pre_price and prev:
+                change = (pre_price - prev) / prev * 100
+                lines.append(f"• **{name}** ({ticker}): Pre-mkt {fmt(pre_price)} ({pct(change)})")
+            elif price and prev:
+                change = (price - prev) / prev * 100
+                lines.append(f"• **{name}** ({ticker}): {fmt(price)} ({pct(change)})")
+    except Exception as e:
+        lines.append(f"  *(Index data unavailable)*")
+
+    # VIX
+    try:
+        vix = yf.Ticker("^VIX")
+        vix_price = vix.info.get("regularMarketPrice") or vix.info.get("previousClose")
+        if vix_price:
+            vix_emoji = "🟢" if vix_price < 18 else "🟡" if vix_price < 25 else "🔴"
+            lines.append(f"• **VIX**: {vix_emoji} {vix_price:.2f}")
+    except Exception:
+        pass
+
+    lines.append("")
+
+    # Pre-market movers
+    lines.append("**📈 Pre-Market Movers:**")
+    try:
+        scan_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
+                        "NFLX", "COIN", "SOFI", "PLTR", "NIO", "RIVN", "MARA", "SQ",
+                        "SNAP", "UBER", "CRWD", "NET", "DKNG", "RBLX", "HOOD", "UPST",
+                        "BABA", "BAC", "F", "INTC", "PYPL", "DIS"]
+        pre_results = []
+        for ticker in scan_tickers:
+            try:
+                t = yf.Ticker(ticker)
+                info = t.info
+                pre = info.get("preMarketPrice")
+                prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
+                if pre and prev and prev > 0:
+                    change = (pre - prev) / prev * 100
+                    pre_results.append((ticker, pre, change))
+            except Exception:
+                continue
+
+        if pre_results:
+            pre_results.sort(key=lambda x: x[2], reverse=True)
+            gainers = [r for r in pre_results if r[2] > 0.5][:3]
+            losers = [r for r in pre_results if r[2] < -0.5][-3:][::-1]
+
+            if gainers:
+                lines.append("🟢 **Gainers:**")
+                for t, p, c in gainers:
+                    lines.append(f"  • **{t}** — {fmt(p)} ({pct(c)})")
+            if losers:
+                lines.append("🔴 **Losers:**")
+                for t, p, c in losers:
+                    lines.append(f"  • **{t}** — {fmt(p)} ({pct(c)})")
+            if not gainers and not losers:
+                lines.append("  *Flat pre-market — no major movers yet.*")
+        else:
+            lines.append("  *Pre-market data not available yet.*")
+    except Exception:
+        lines.append("  *(Pre-market data unavailable)*")
+
+    lines.append("")
+
+    # Economic calendar
+    lines.append("**📅 Economic Events Today:**")
+    events = fetch_economic_calendar()
+    if events:
+        for t, name, actual, forecast, prev in events[:5]:
+            time_part = f"{t} " if t else ""
+            lines.append(f"  • {time_part}**{name}** (Exp: {forecast} | Prev: {prev})")
+    else:
+        lines.append("  *No major releases today.*")
+
+    lines.append("\n*Prep your levels. Manage your risk. Let's eat.* 🍜👑")
+    return "\n".join(lines)
+
+
+# ─── SCHEDULED TASKS ───
+
+
+@tasks.loop(time=time(hour=9, minute=0, tzinfo=ET))
+async def daily_market_prep():
+    guild = client.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    channel = discord.utils.get(guild.text_channels, name=DAILY_CHANNEL_NAME)
+    if channel is None:
+        print(f"Channel #{DAILY_CHANNEL_NAME} not found for daily prep")
+        return
+    try:
+        prep = await asyncio.to_thread(build_market_prep)
+        if len(prep) > 2000:
+            prep = prep[:1997] + "..."
+        await channel.send(prep)
+        print(f"Posted daily market prep to #{DAILY_CHANNEL_NAME}")
+    except Exception as e:
+        print(f"Failed to post daily prep: {e}")
+
+
+@daily_market_prep.before_loop
+async def before_daily_prep():
+    await client.wait_until_ready()
+
+
 # ─── BOT EVENTS ───
 
 
@@ -780,6 +973,9 @@ MARKET_COMMANDS = {
     "movers": lambda _: cmd_movers(),
     "sectors": lambda _: cmd_sectors(),
     "market": lambda _: cmd_market(),
+    "calendar": lambda _: cmd_calendar(),
+    "econ": lambda _: cmd_calendar(),
+    "prep": lambda _: build_market_prep(),
 }
 
 
@@ -794,6 +990,9 @@ async def on_ready():
     verification_message_id = await find_verification_message(guild)
     print(f"Watching verification message id: {verification_message_id}")
     print(f"AI responses: {'enabled' if claude_client else 'disabled (no ANTHROPIC_API_KEY)'}")
+    if not daily_market_prep.is_running():
+        daily_market_prep.start()
+        print("Started daily 9:00 AM ET market prep task")
 
 
 @client.event
