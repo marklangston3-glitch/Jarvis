@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GUILD_ID = 1513190467796336830
 RULES_CHANNEL_NAME = "rules"
-DAILY_CHANNEL_NAME = "daily-levels"
+DAILY_CHANNEL_NAME = "watchlist"
 VERIFY_EMOJI = "✅"
 FREE_MEMBER_ROLE = "Free Member"
 UNVERIFIED_ROLE = "Unverified"
@@ -715,6 +715,7 @@ def cmd_market():
     try:
         tickers = ["SPY", "QQQ", "DIA", "IWM", "VIX"]
         names = {"SPY": "S&P 500", "QQQ": "Nasdaq 100", "DIA": "Dow Jones", "IWM": "Russell 2000", "VIX": "VIX"}
+        # VIX is ^VIX in yfinance
         yf_tickers = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
         data = yf.download(yf_tickers, period="2d", group_by="ticker", progress=False)
 
