@@ -1145,12 +1145,15 @@ async def auto_create_channels(guild):
         moose_cat = await guild.create_category("🫎 Moose Market Milad")
         print("Created category: Moose Market Milad")
 
-    moose_channels = {
-        "moose-stage": "🎤 Main stage — Milad's market commentary & calls",
+    if "moose-stage" not in existing:
+        await guild.create_voice_channel("moose-stage", category=moose_cat)
+        print("Created 🎤 #moose-stage (voice)")
+
+    moose_text_channels = {
         "moose-trade-talk": "💬 Talk through trades live with the community",
         "moose-analysis": "📈 Breakdowns, analysis, and deep dives",
     }
-    for name, topic in moose_channels.items():
+    for name, topic in moose_text_channels.items():
         if name not in existing:
             await guild.create_text_channel(name, category=moose_cat, topic=topic)
             print(f"Created #{name}")
