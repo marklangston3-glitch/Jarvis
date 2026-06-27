@@ -83,7 +83,7 @@ language naturally. Keep responses short (1-3 sentences max). Use 🍜 or 👑 s
 Server context:
 - Free members get: #general-chat, #market-talk, #memes, #daily-levels, #watchlist, #charting
 - Jarvis Hub: #jarvis-alerts (breaking news), #jarvis-market-data (data outputs), #jarvis-calendar (prep/calendar)
-- Moose Market Milad: #moose-stage, #moose-trade-talk, #moose-analysis
+- Moose Market Milad: #moose-stage (voice), #moose-trade-talk, #moose-analysis
 - Paid members unlock: #live-calls, #options-flow, #trade-recaps, #playbook, #recordings, #q-and-a, #long-term-plays
 - To upgrade: check #how-to-get-access
 - Rules are in #rules
@@ -157,7 +157,7 @@ STATIC_COMMANDS = {
         "• #jarvis-market-data — price, technicals, options, levels\n"
         "• #jarvis-calendar — economic calendar, market prep, earnings\n\n"
         "**🫎 Moose Market Milad:**\n"
-        "• #moose-stage — main stage\n"
+        "• #moose-stage — main stage (voice)\n"
         "• #moose-trade-talk — talk through trades live\n"
         "• #moose-analysis — breakdowns & analysis\n\n"
         "**Free:**\n"
@@ -1145,12 +1145,15 @@ async def auto_create_channels(guild):
         moose_cat = await guild.create_category("🫎 Moose Market Milad")
         print("Created category: Moose Market Milad")
 
-    moose_channels = {
-        "moose-stage": "🎤 Main stage — Milad's market commentary & calls",
+    if "moose-stage" not in existing:
+        await guild.create_voice_channel("moose-stage", category=moose_cat)
+        print("Created 🎤 #moose-stage (voice)")
+
+    moose_text_channels = {
         "moose-trade-talk": "💬 Talk through trades live with the community",
         "moose-analysis": "📈 Breakdowns, analysis, and deep dives",
     }
-    for name, topic in moose_channels.items():
+    for name, topic in moose_text_channels.items():
         if name not in existing:
             await guild.create_text_channel(name, category=moose_cat, topic=topic)
             print(f"Created #{name}")
