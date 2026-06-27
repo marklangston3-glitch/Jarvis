@@ -32,6 +32,43 @@ VERIFY_EMOJI = "✅"
 FREE_MEMBER_ROLE = "Free Member"
 UNVERIFIED_ROLE = "Unverified"
 
+# ─── JARVIS HUB SUB-CHANNELS ───
+JARVIS_ALERTS_CHANNEL = "jarvis-alerts"
+JARVIS_DATA_CHANNEL = "jarvis-market-data"
+JARVIS_CALENDAR_CHANNEL = "jarvis-calendar"
+
+# ─── COMMAND → SUB-CHANNEL ROUTING ───
+COMMAND_ROUTING = {
+    "price": JARVIS_DATA_CHANNEL,
+    "technicals": JARVIS_DATA_CHANNEL,
+    "ta": JARVIS_DATA_CHANNEL,
+    "options": JARVIS_DATA_CHANNEL,
+    "flow": JARVIS_DATA_CHANNEL,
+    "levels": JARVIS_DATA_CHANNEL,
+    "info": JARVIS_DATA_CHANNEL,
+    "movers": JARVIS_DATA_CHANNEL,
+    "sectors": JARVIS_DATA_CHANNEL,
+    "market": JARVIS_DATA_CHANNEL,
+    "crypto": JARVIS_DATA_CHANNEL,
+    "coin": JARVIS_DATA_CHANNEL,
+    "fear": JARVIS_DATA_CHANNEL,
+    "greed": JARVIS_DATA_CHANNEL,
+    "earnings": JARVIS_CALENDAR_CHANNEL,
+    "news": JARVIS_ALERTS_CHANNEL,
+    "calendar": JARVIS_CALENDAR_CHANNEL,
+    "econ": JARVIS_CALENDAR_CHANNEL,
+    "prep": JARVIS_CALENDAR_CHANNEL,
+}
+
+# ─── NEWS SCANNER ───
+NEWS_RSS_FEEDS = {
+    "Forex Factory": "https://www.forexfactory.com/rss",
+    "WSJ Markets": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+    "WSJ World": "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
+    "Reuters Business": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+}
+seen_news_ids = set()
+
 WELCOME_DM = (
     "👑 Welcome to The Soup Kitchen. You've got access to the free channels. "
     "When you're ready for the full menu, check #how-to-get-access. "
@@ -45,14 +82,17 @@ language naturally. Keep responses short (1-3 sentences max). Use 🍜 or 👑 s
 
 Server context:
 - Free members get: #general-chat, #market-talk, #memes, #daily-levels, #watchlist, #charting
-- Paid members unlock: #live-calls, #options-flow, #trade-recaps, #playbook, #recordings, #q-and-a
+- Jarvis Hub: #jarvis-alerts (breaking news), #jarvis-market-data (data outputs), #jarvis-calendar (prep/calendar)
+- Moose Market Milad: #moose-stage, #moose-trade-talk, #moose-analysis
+- Paid members unlock: #live-calls, #options-flow, #trade-recaps, #playbook, #recordings, #q-and-a, #long-term-plays
 - To upgrade: check #how-to-get-access
 - Rules are in #rules
 - Post wins in #wins, journal trades in #trade-journal
 
 Jarvis has built-in market data commands: price, options, technicals, news, earnings, crypto,
-fear, movers, sectors, levels. If a user asks for market data, tell them to use the specific
-command (e.g. @Jarvis price SPY) rather than trying to answer from memory.
+fear, movers, sectors, levels. Jarvis can be prompted from any channel — outputs are routed to
+the correct Jarvis Hub sub-channel automatically. Jarvis also scans for breaking financial news
+and posts alerts to #jarvis-alerts in real-time.
 
 Never give financial advice. If asked for a specific trade, say the kitchen serves levels and
 frameworks, not financial advice. Direct them to the appropriate channel instead.
@@ -64,29 +104,32 @@ Free Member or Unverified users to #how-to-get-access."""
 
 HELP_TEXT = (
     "👑 **Jarvis Commands**\n\n"
-    "**📊 Market Data:**\n"
+    "**📊 Market Data** → routed to #jarvis-market-data:\n"
     "• `@Jarvis price SPY` — live quote + daily change\n"
     "• `@Jarvis technicals SPY` — RSI, MACD, SMAs, VWAP\n"
     "• `@Jarvis options SPY` — options chain snapshot\n"
     "• `@Jarvis options movers` — top 10 most active contracts market-wide\n"
     "• `@Jarvis levels SPY` — key support/resistance levels\n"
-    "• `@Jarvis earnings AAPL` — next earnings + recent EPS\n"
-    "• `@Jarvis news AAPL` — latest headlines\n"
     "• `@Jarvis info AAPL` — company overview\n"
     "• `@Jarvis movers` — top gainers & losers today\n"
     "• `@Jarvis sectors` — sector performance\n"
     "• `@Jarvis crypto BTC` — crypto price\n"
     "• `@Jarvis fear` — Fear & Greed Index\n"
-    "• `@Jarvis market` — market overview (SPY, QQQ, VIX)\n"
+    "• `@Jarvis market` — market overview (SPY, QQQ, VIX)\n\n"
+    "**📅 Calendar & Prep** → routed to #jarvis-calendar:\n"
+    "• `@Jarvis earnings AAPL` — next earnings + recent EPS\n"
     "• `@Jarvis calendar` — today's US economic events\n"
     "• `@Jarvis prep` — full morning market prep\n\n"
+    "**🚨 News & Alerts** → routed to #jarvis-alerts:\n"
+    "• `@Jarvis news AAPL` — latest headlines\n"
+    "• Breaking news auto-scanned from WSJ, Reuters, Forex Factory\n\n"
     "**🛠️ Server:**\n"
     "• `@Jarvis rules` — server rules\n"
     "• `@Jarvis access` — how to get paid access\n"
     "• `@Jarvis channels` — channel guide\n"
     "• `@Jarvis gm` — morning check-in\n"
     "• `@Jarvis disclaimer` — financial disclaimer\n\n"
-    "Or just talk to me — I'm powered by AI. 🍜"
+    "Prompt me from **any channel** — I'll route outputs to the right place. 🍜"
 )
 
 STATIC_COMMANDS = {
@@ -108,7 +151,15 @@ STATIC_COMMANDS = {
         "Head to #how-to-get-access for details and the payment link. 👑"
     ),
     "channels": (
-        "📊 **Channel Guide**\n"
+        "📊 **Channel Guide**\n\n"
+        "**🤖 Jarvis Hub:**\n"
+        "• #jarvis-alerts — breaking news & red folder alerts\n"
+        "• #jarvis-market-data — price, technicals, options, levels\n"
+        "• #jarvis-calendar — economic calendar, market prep, earnings\n\n"
+        "**🫎 Moose Market Milad:**\n"
+        "• #moose-stage — main stage\n"
+        "• #moose-trade-talk — talk through trades live\n"
+        "• #moose-analysis — breakdowns & analysis\n\n"
         "**Free:**\n"
         "• #general-chat — community talk\n"
         "• #market-talk — market discussion\n"
@@ -123,7 +174,8 @@ STATIC_COMMANDS = {
         "• #trade-recaps — full breakdowns\n"
         "• #playbook — our framework\n"
         "• #recordings — past sessions\n"
-        "• #q-and-a — ask questions 🍜"
+        "• #q-and-a — ask questions\n"
+        "• #long-term-plays — long-term investment plays 🍜"
     ),
     "gm": "☀️ GM! Markets are open, the kitchen is hot. Let's eat. 🍜👑",
     "disclaimer": (
@@ -894,6 +946,51 @@ def build_market_prep():
     return "\n".join(lines)
 
 
+# ─── NEWS SCANNER ───
+
+
+def fetch_breaking_news():
+    import xml.etree.ElementTree as ElementTree
+    new_articles = []
+    for source, url in NEWS_RSS_FEEDS.items():
+        try:
+            resp = http_requests.get(url, timeout=10, headers={"User-Agent": "JarvisBot/1.0"})
+            if resp.status_code != 200:
+                continue
+            root = ElementTree.fromstring(resp.content)
+            for item in root.iter("item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                pub_el = item.find("pubDate")
+                if title_el is None:
+                    continue
+                title = title_el.text or ""
+                link = link_el.text if link_el is not None else ""
+                pub_date = pub_el.text if pub_el is not None else ""
+                news_id = f"{source}:{title[:80]}"
+                if news_id in seen_news_ids:
+                    continue
+                seen_news_ids.add(news_id)
+                is_market_moving = any(kw in title.lower() for kw in [
+                    "breaking", "urgent", "fed ", "federal reserve", "rate", "inflation",
+                    "cpi", "ppi", "gdp", "jobs", "payroll", "unemployment", "tariff",
+                    "crash", "surge", "plunge", "halt", "war", "sanction", "default",
+                    "recession", "rally", "sell-off", "selloff", "billion", "trillion",
+                    "sec ", "regulation", "bank", "oil", "opec", "treasury", "bond",
+                    "earnings", "guidance", "downgrade", "upgrade", "ipo", "merger",
+                    "acquisition", "layoff", "bankruptcy", "stimulus", "debt ceiling",
+                ])
+                if is_market_moving:
+                    new_articles.append((source, title, link, pub_date))
+        except Exception:
+            continue
+    if len(seen_news_ids) > 500:
+        oldest = list(seen_news_ids)[:200]
+        for k in oldest:
+            seen_news_ids.discard(k)
+    return new_articles
+
+
 # ─── SCHEDULED TASKS ───
 
 
@@ -902,16 +999,18 @@ async def daily_market_prep():
     guild = client.get_guild(GUILD_ID)
     if guild is None:
         return
-    channel = discord.utils.get(guild.text_channels, name=DAILY_CHANNEL_NAME)
+    channel = discord.utils.get(guild.text_channels, name=JARVIS_CALENDAR_CHANNEL)
     if channel is None:
-        print(f"Channel #{DAILY_CHANNEL_NAME} not found for daily prep")
+        channel = discord.utils.get(guild.text_channels, name=DAILY_CHANNEL_NAME)
+    if channel is None:
+        print(f"Channel #{JARVIS_CALENDAR_CHANNEL} not found for daily prep")
         return
     try:
         prep = await asyncio.to_thread(build_market_prep)
         if len(prep) > 2000:
             prep = prep[:1997] + "..."
         await channel.send(prep)
-        print(f"Posted daily market prep to #{DAILY_CHANNEL_NAME}")
+        print(f"Posted daily market prep to #{channel.name}")
     except Exception as e:
         print(f"Failed to post daily prep: {e}")
 
@@ -919,6 +1018,40 @@ async def daily_market_prep():
 @daily_market_prep.before_loop
 async def before_daily_prep():
     await client.wait_until_ready()
+
+
+@tasks.loop(minutes=5)
+async def news_scanner():
+    guild = client.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    channel = discord.utils.get(guild.text_channels, name=JARVIS_ALERTS_CHANNEL)
+    if channel is None:
+        print(f"Channel #{JARVIS_ALERTS_CHANNEL} not found for news alerts")
+        return
+    try:
+        articles = await asyncio.to_thread(fetch_breaking_news)
+        for source, title, link, pub_date in articles:
+            alert = (
+                f"🚨 **BREAKING — {source}**\n"
+                f"**{title}**\n"
+            )
+            if link:
+                alert += f"{link}\n"
+            if len(alert) > 2000:
+                alert = alert[:1997] + "..."
+            await channel.send(alert)
+            await asyncio.sleep(1)
+        if articles:
+            print(f"Posted {len(articles)} breaking news alerts to #{JARVIS_ALERTS_CHANNEL}")
+    except Exception as e:
+        print(f"News scanner error: {e}")
+
+
+@news_scanner.before_loop
+async def before_news_scanner():
+    await client.wait_until_ready()
+    await asyncio.to_thread(fetch_breaking_news)
 
 
 # ─── BOT EVENTS ───
@@ -993,6 +1126,9 @@ async def on_ready():
     if not daily_market_prep.is_running():
         daily_market_prep.start()
         print("Started daily 9:00 AM ET market prep task")
+    if not news_scanner.is_running():
+        news_scanner.start()
+        print("Started breaking news scanner (every 5 min)")
 
 
 @client.event
@@ -1063,7 +1199,15 @@ async def on_message(message):
                 result = await asyncio.to_thread(MARKET_COMMANDS[cmd_name], cmd_args)
             if len(result) > 2000:
                 result = result[:1997] + "..."
-            await message.reply(result, mention_author=False)
+            target_channel_name = COMMAND_ROUTING.get(cmd_name)
+            target_channel = None
+            if target_channel_name and message.channel.name != target_channel_name:
+                target_channel = discord.utils.get(message.guild.text_channels, name=target_channel_name)
+            if target_channel:
+                await target_channel.send(f"*Requested by {message.author.mention} in #{message.channel.name}*\n\n{result}")
+                await message.reply(f"✅ Output posted to {target_channel.mention}", mention_author=False)
+            else:
+                await message.reply(result, mention_author=False)
         except Exception as e:
             print(f"Command error: {e}")
             await message.reply(f"❌ Something went wrong running that command.", mention_author=False)
