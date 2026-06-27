@@ -1112,6 +1112,74 @@ MARKET_COMMANDS = {
 }
 
 
+async def auto_create_channels(guild):
+    existing = {c.name for c in guild.channels}
+
+    # Jarvis Hub category + sub-channels
+    jarvis_cat = None
+    for c in guild.categories:
+        if "jarvis" in c.name.lower():
+            jarvis_cat = c
+            break
+    if jarvis_cat is None:
+        jarvis_cat = await guild.create_category("🤖 Jarvis Hub")
+        print("Created category: Jarvis Hub")
+
+    jarvis_channels = {
+        JARVIS_ALERTS_CHANNEL: "🚨 Breaking financial news & red folder alerts from Jarvis",
+        JARVIS_DATA_CHANNEL: "📊 Market data outputs — price, technicals, options, levels, movers",
+        JARVIS_CALENDAR_CHANNEL: "📅 Economic calendar, daily market prep, earnings data",
+    }
+    for name, topic in jarvis_channels.items():
+        if name not in existing:
+            await guild.create_text_channel(name, category=jarvis_cat, topic=topic)
+            print(f"Created #{name}")
+
+    # Moose Market Milad category + channels
+    moose_cat = None
+    for c in guild.categories:
+        if "moose" in c.name.lower():
+            moose_cat = c
+            break
+    if moose_cat is None:
+        moose_cat = await guild.create_category("🫎 Moose Market Milad")
+        print("Created category: Moose Market Milad")
+
+    moose_channels = {
+        "moose-stage": "🎤 Main stage — Milad's market commentary & calls",
+        "moose-trade-talk": "💬 Talk through trades live with the community",
+        "moose-analysis": "📈 Breakdowns, analysis, and deep dives",
+    }
+    for name, topic in moose_channels.items():
+        if name not in existing:
+            await guild.create_text_channel(name, category=moose_cat, topic=topic)
+            print(f"Created #{name}")
+
+    # Long-term plays (paid only)
+    if "long-term-plays" not in existing:
+        paid_cat = None
+        for c in guild.categories:
+            if "paid" in c.name.lower() or "premium" in c.name.lower() or "vip" in c.name.lower():
+                paid_cat = c
+                break
+        paid_role = discord.utils.get(guild.roles, name="Paid Member")
+        admin_role = discord.utils.get(guild.roles, name="Admin")
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        if paid_role:
+            overwrites[paid_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        await guild.create_text_channel(
+            "long-term-plays", category=paid_cat,
+            topic="💎 Long-term investment plays — Paid members only",
+            overwrites=overwrites,
+        )
+        print("Created #long-term-plays (paid only)")
+
+
 @client.event
 async def on_ready():
     global verification_message_id
@@ -1120,6 +1188,11 @@ async def on_ready():
     if guild is None:
         print(f"Guild {GUILD_ID} not found")
         return
+    try:
+        await auto_create_channels(guild)
+        print("Channel auto-creation complete")
+    except Exception as e:
+        print(f"Channel auto-creation error (may need Manage Channels permission): {e}")
     verification_message_id = await find_verification_message(guild)
     print(f"Watching verification message id: {verification_message_id}")
     print(f"AI responses: {'enabled' if claude_client else 'disabled (no ANTHROPIC_API_KEY)'}")
