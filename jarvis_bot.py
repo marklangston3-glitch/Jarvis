@@ -521,13 +521,21 @@ def cmd_news(ticker):
             return f"❌ No recent news for **{ticker.upper()}**."
         lines = [f"📰 **{ticker.upper()} Latest News**\n"]
         for item in news[:7]:
-            title = item.get("title", "Untitled")
-            link = item.get("link", "")
-            publisher = item.get("publisher", "")
-            pub_time = item.get("providerPublishTime")
+            content = item.get("content", item)
+            title = content.get("title", "Untitled")
+            link = content.get("canonicalUrl", {}).get("url", "") if isinstance(content.get("canonicalUrl"), dict) else content.get("canonicalUrl", content.get("link", ""))
+            provider = content.get("provider", {})
+            publisher = provider.get("displayName", "") if isinstance(provider, dict) else content.get("publisher", "")
+            pub_date = content.get("pubDate", "")
             time_str = ""
-            if pub_time:
-                dt = datetime.fromtimestamp(pub_time)
+            if pub_date and isinstance(pub_date, str):
+                try:
+                    dt = datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
+                    time_str = f" ({dt.astimezone(ET).strftime('%b %d, %I:%M %p')})"
+                except Exception:
+                    pass
+            elif isinstance(pub_date, (int, float)):
+                dt = datetime.fromtimestamp(pub_date)
                 time_str = f" ({dt.strftime('%b %d, %I:%M %p')})"
             lines.append(f"• **{title}**\n  {publisher}{time_str}\n  {link}\n")
         return "\n".join(lines)
