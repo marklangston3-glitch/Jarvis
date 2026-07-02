@@ -877,9 +877,16 @@ def build_market_prep():
             price = info.get("regularMarketPrice") or info.get("currentPrice")
             prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
             pre_price = info.get("preMarketPrice")
-            if pre_price and prev:
+            # Validate pre-market price: must be within 25% of prev close and change must be realistic
+            if pre_price and prev and price:
                 change = (pre_price - prev) / prev * 100
-                lines.append(f"• **{name}** ({ticker}): Pre-mkt {fmt(pre_price)} ({pct(change)})")
+                price_ratio = pre_price / price
+                if abs(change) <= 25 and 0.5 <= price_ratio <= 2.0:
+                    lines.append(f"• **{name}** ({ticker}): Pre-mkt {fmt(pre_price)} ({pct(change)})")
+                else:
+                    # Pre-market data looks stale/bad, fall back to regular
+                    change = (price - prev) / prev * 100
+                    lines.append(f"• **{name}** ({ticker}): {fmt(price)} ({pct(change)})")
             elif price and prev:
                 change = (price - prev) / prev * 100
                 lines.append(f"• **{name}** ({ticker}): {fmt(price)} ({pct(change)})")
@@ -912,9 +919,13 @@ def build_market_prep():
                 info = t.info
                 pre = info.get("preMarketPrice")
                 prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
-                if pre and prev and prev > 0:
+                price = info.get("regularMarketPrice") or info.get("currentPrice")
+                if pre and prev and prev > 0 and price:
                     change = (pre - prev) / prev * 100
-                    pre_results.append((ticker, pre, change))
+                    price_ratio = pre / price
+                    # Filter out stale/bad pre-market data: cap at ±25% and check ratio vs regular price
+                    if abs(change) <= 25 and 0.5 <= price_ratio <= 2.0:
+                        pre_results.append((ticker, pre, change))
             except Exception:
                 continue
 
