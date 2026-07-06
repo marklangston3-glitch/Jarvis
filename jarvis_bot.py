@@ -867,14 +867,35 @@ def build_market_prep():
     now = datetime.now(ET)
     date_str = now.strftime("%A, %b %d, %Y")
 
+    scan_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
+                    "NFLX", "COIN", "SOFI", "PLTR", "NIO", "RIVN", "MARA", "SQ",
+                    "SNAP", "UBER", "CRWD", "NET", "DKNG", "RBLX", "HOOD", "UPST",
+                    "BABA", "BAC", "F", "INTC", "PYPL", "DIS"]
+    index_tickers = ["SPY", "QQQ", "DIA", "IWM"]
+
+    # ── Batch: get reliable previous closes from history (avoids stale .info fields) ──
+    prev_closes = {}
+    try:
+        all_tickers = index_tickers + scan_tickers
+        batch = yf.download(all_tickers, period="5d", interval="1d", group_by="ticker", progress=False, auto_adjust=True)
+        for t in all_tickers:
+            try:
+                closes = batch[t]["Close"].dropna()
+                if len(closes) > 0:
+                    prev_closes[t] = float(closes.iloc[-1])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # ── Collect: indices ──────────────────────────────────────────────────────
     index_rows = []  # (name, ticker, price, pre_price, pre_change, reg_change)
     for ticker, name in [("SPY", "S&P 500"), ("QQQ", "Nasdaq 100"), ("DIA", "Dow Jones"), ("IWM", "Russell 2000")]:
         try:
             info = yf.Ticker(ticker).info
             price = info.get("regularMarketPrice") or info.get("currentPrice")
-            prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
             pre = info.get("preMarketPrice")
+            prev = prev_closes.get(ticker) or info.get("regularMarketPreviousClose") or info.get("previousClose")
             pre_change = None
             reg_change = (price - prev) / prev * 100 if price and prev else None
             if pre and prev and price:
@@ -904,17 +925,14 @@ def build_market_prep():
         pass
 
     # ── Collect: pre-market movers ────────────────────────────────────────────
-    scan_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
-                    "NFLX", "COIN", "SOFI", "PLTR", "NIO", "RIVN", "MARA", "SQ",
-                    "SNAP", "UBER", "CRWD", "NET", "DKNG", "RBLX", "HOOD", "UPST",
-                    "BABA", "BAC", "F", "INTC", "PYPL", "DIS"]
     pre_results = []
     for ticker in scan_tickers:
         try:
             info = yf.Ticker(ticker).info
             pre = info.get("preMarketPrice")
-            prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
             price = info.get("regularMarketPrice") or info.get("currentPrice")
+            # Use batch-downloaded close for reliable prev; fall back to .info
+            prev = prev_closes.get(ticker) or info.get("regularMarketPreviousClose") or info.get("previousClose")
             if pre and prev and prev > 0 and price:
                 c = (pre - prev) / prev * 100
                 if abs(c) <= 25 and 0.5 <= pre / price <= 2.0:
