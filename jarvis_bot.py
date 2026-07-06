@@ -83,7 +83,7 @@ language naturally. Keep responses short (1-3 sentences max). Use 🍜 or 👑 s
 Server context:
 - Free members get: #general-chat, #market-talk, #memes, #daily-levels, #watchlist, #charting
 - Jarvis Hub: #jarvis-alerts (breaking news), #jarvis-market-data (data outputs), #jarvis-calendar (prep/calendar)
-- Moose Market Milad: #moose-stage (voice), #moose-trade-talk, #moose-analysis
+- Moose Market Milad: #moose-stage, #moose-trade-talk, #moose-analysis
 - Paid members unlock: #live-calls, #options-flow, #trade-recaps, #playbook, #recordings, #q-and-a, #long-term-plays
 - To upgrade: check #how-to-get-access
 - Rules are in #rules
@@ -157,7 +157,7 @@ STATIC_COMMANDS = {
         "• #jarvis-market-data — price, technicals, options, levels\n"
         "• #jarvis-calendar — economic calendar, market prep, earnings\n\n"
         "**🫎 Moose Market Milad:**\n"
-        "• #moose-stage — main stage (voice)\n"
+        "• #moose-stage — main stage\n"
         "• #moose-trade-talk — talk through trades live\n"
         "• #moose-analysis — breakdowns & analysis\n\n"
         "**Free:**\n"
@@ -859,109 +859,212 @@ def cmd_calendar():
 
 # ─── DAILY MARKET PREP ───
 
+HIGH_IMPACT_KEYWORDS = ["cpi", "ppi", "gdp", "payroll", "fomc", "federal reserve", "rate decision", "nonfarm", "unemployment"]
+
 
 def build_market_prep():
+    """Returns a list of up to 3 Discord messages forming the complete morning brief."""
     now = datetime.now(ET)
-    lines = [f"☀️ **Good Morning, Kitchen — {now.strftime('%A, %b %d, %Y')}**\n"]
+    date_str = now.strftime("%A, %b %d, %Y")
 
-    # Index futures / pre-market
-    lines.append("**🌍 Index Check:**")
-    try:
-        index_tickers = {
-            "SPY": "S&P 500", "QQQ": "Nasdaq 100", "DIA": "Dow Jones",
-            "IWM": "Russell 2000",
-        }
-        for ticker, name in index_tickers.items():
-            t = yf.Ticker(ticker)
-            info = t.info
+    # ── Collect: indices ──────────────────────────────────────────────────────
+    index_rows = []  # (name, ticker, price, pre_price, pre_change, reg_change)
+    for ticker, name in [("SPY", "S&P 500"), ("QQQ", "Nasdaq 100"), ("DIA", "Dow Jones"), ("IWM", "Russell 2000")]:
+        try:
+            info = yf.Ticker(ticker).info
             price = info.get("regularMarketPrice") or info.get("currentPrice")
             prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
-            pre_price = info.get("preMarketPrice")
-            # Validate pre-market price: must be within 25% of prev close and ratio vs regular price must be sane
-            if pre_price and prev and price:
-                change = (pre_price - prev) / prev * 100
-                price_ratio = pre_price / price
-                if abs(change) <= 25 and 0.5 <= price_ratio <= 2.0:
-                    lines.append(f"• **{name}** ({ticker}): Pre-mkt {fmt(pre_price)} ({pct(change)})")
-                else:
-                    change = (price - prev) / prev * 100
-                    lines.append(f"• **{name}** ({ticker}): {fmt(price)} ({pct(change)})")
-            elif price and prev:
-                change = (price - prev) / prev * 100
-                lines.append(f"• **{name}** ({ticker}): {fmt(price)} ({pct(change)})")
-    except Exception as e:
-        lines.append(f"  *(Index data unavailable)*")
+            pre = info.get("preMarketPrice")
+            pre_change = None
+            reg_change = (price - prev) / prev * 100 if price and prev else None
+            if pre and prev and price:
+                c = (pre - prev) / prev * 100
+                if abs(c) <= 25 and 0.5 <= pre / price <= 2.0:
+                    pre_change = c
+            index_rows.append((name, ticker, price, pre, pre_change, reg_change))
+        except Exception:
+            index_rows.append((name, ticker, None, None, None, None))
 
-    # VIX
+    # ── Collect: VIX ─────────────────────────────────────────────────────────
+    vix_price = None
     try:
-        vix = yf.Ticker("^VIX")
-        vix_price = vix.info.get("regularMarketPrice") or vix.info.get("previousClose")
-        if vix_price:
-            vix_emoji = "🟢" if vix_price < 18 else "🟡" if vix_price < 25 else "🔴"
-            lines.append(f"• **VIX**: {vix_emoji} {vix_price:.2f}")
+        vix_info = yf.Ticker("^VIX").info
+        vix_price = vix_info.get("regularMarketPrice") or vix_info.get("previousClose")
     except Exception:
         pass
 
-    lines.append("")
-
-    # Pre-market movers
-    lines.append("**📈 Pre-Market Movers:**")
+    # ── Collect: Fear & Greed ─────────────────────────────────────────────────
+    fg_value, fg_label = None, None
     try:
-        scan_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
-                        "NFLX", "COIN", "SOFI", "PLTR", "NIO", "RIVN", "MARA", "SQ",
-                        "SNAP", "UBER", "CRWD", "NET", "DKNG", "RBLX", "HOOD", "UPST",
-                        "BABA", "BAC", "F", "INTC", "PYPL", "DIS"]
-        pre_results = []
-        for ticker in scan_tickers:
-            try:
-                t = yf.Ticker(ticker)
-                info = t.info
-                pre = info.get("preMarketPrice")
-                prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
-                price = info.get("regularMarketPrice") or info.get("currentPrice")
-                if pre and prev and prev > 0 and price:
-                    change = (pre - prev) / prev * 100
-                    price_ratio = pre / price
-                    # Filter stale/bad pre-market data: cap at ±25% and must be close to regular price
-                    if abs(change) <= 25 and 0.5 <= price_ratio <= 2.0:
-                        pre_results.append((ticker, pre, change))
-            except Exception:
-                continue
-
-        if pre_results:
-            pre_results.sort(key=lambda x: x[2], reverse=True)
-            gainers = [r for r in pre_results if r[2] > 0.5][:3]
-            losers = [r for r in pre_results if r[2] < -0.5][-3:][::-1]
-
-            if gainers:
-                lines.append("🟢 **Gainers:**")
-                for t, p, c in gainers:
-                    lines.append(f"  • **{t}** — {fmt(p)} ({pct(c)})")
-            if losers:
-                lines.append("🔴 **Losers:**")
-                for t, p, c in losers:
-                    lines.append(f"  • **{t}** — {fmt(p)} ({pct(c)})")
-            if not gainers and not losers:
-                lines.append("  *Flat pre-market — no major movers yet.*")
-        else:
-            lines.append("  *Pre-market data not available yet.*")
+        fg_resp = http_requests.get("https://api.alternative.me/fng/?limit=1&format=json", timeout=8)
+        fg_data = fg_resp.json()["data"][0]
+        fg_value = int(fg_data["value"])
+        fg_label = fg_data["value_classification"]
     except Exception:
-        lines.append("  *(Pre-market data unavailable)*")
+        pass
 
-    lines.append("")
+    # ── Collect: pre-market movers ────────────────────────────────────────────
+    scan_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
+                    "NFLX", "COIN", "SOFI", "PLTR", "NIO", "RIVN", "MARA", "SQ",
+                    "SNAP", "UBER", "CRWD", "NET", "DKNG", "RBLX", "HOOD", "UPST",
+                    "BABA", "BAC", "F", "INTC", "PYPL", "DIS"]
+    pre_results = []
+    for ticker in scan_tickers:
+        try:
+            info = yf.Ticker(ticker).info
+            pre = info.get("preMarketPrice")
+            prev = info.get("regularMarketPreviousClose") or info.get("previousClose")
+            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            if pre and prev and prev > 0 and price:
+                c = (pre - prev) / prev * 100
+                if abs(c) <= 25 and 0.5 <= pre / price <= 2.0:
+                    pre_results.append((ticker, pre, c))
+        except Exception:
+            continue
+    pre_results.sort(key=lambda x: x[2], reverse=True)
+    gainers = [r for r in pre_results if r[2] > 0.5][:3]
+    losers = [r for r in pre_results if r[2] < -0.5][-3:][::-1]
 
-    # Economic calendar
-    lines.append("**📅 Economic Events Today:**")
-    events = fetch_economic_calendar()
-    if events:
-        for t, name, actual, forecast, prev in events[:5]:
-            time_part = f"{t} " if t else ""
-            lines.append(f"  • {time_part}**{name}** (Exp: {forecast} | Prev: {prev})")
+    # ── Collect: economic calendar ────────────────────────────────────────────
+    events = fetch_economic_calendar() or []
+
+    # ── Collect: earnings today ───────────────────────────────────────────────
+    today = now.date()
+    earnings_today = []
+    for ticker in ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
+                   "NFLX", "BAC", "JPM", "GS", "COIN", "PLTR", "CRWD", "NET", "SNOW"]:
+        try:
+            cal = yf.Ticker(ticker).calendar
+            if cal and isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if ed and isinstance(ed, list) and len(ed) > 0:
+                    ed_date = ed[0].date() if hasattr(ed[0], "date") else None
+                    if ed_date == today:
+                        est = cal.get("Earnings Average")
+                        est_str = f" (Est: {fmt(est)} EPS)" if est else ""
+                        earnings_today.append(f"{ticker}{est_str}")
+        except Exception:
+            continue
+
+    # ── Collect: SPY pivot levels ─────────────────────────────────────────────
+    spy_levels = {}
+    try:
+        hist = yf.Ticker("SPY").history(period="5d", interval="1d")
+        if not hist.empty and len(hist) >= 2:
+            ph, pl, pc = hist["High"].iloc[-2], hist["Low"].iloc[-2], hist["Close"].iloc[-2]
+            pp = (ph + pl + pc) / 3
+            spy_levels = {"pivot": pp, "r1": 2*pp - pl, "r2": pp + (ph - pl), "s1": 2*pp - ph, "s2": pp - (ph - pl)}
+    except Exception:
+        pass
+
+    # ── Determine tone ────────────────────────────────────────────────────────
+    spy_change = next((pre_c if pre_c is not None else reg_c for _, t, _, _, pre_c, reg_c in index_rows if t == "SPY"), None)
+    high_impact_today = [e for e in events if any(kw in e[1].lower() for kw in HIGH_IMPACT_KEYWORDS)]
+
+    if vix_price and spy_change is not None:
+        if spy_change > 0.5 and vix_price < 18:
+            tone = "🟢 **Bullish open** — futures up, VIX calm. Look for early continuation or buy dips after 9:45 AM."
+        elif spy_change < -0.5 and vix_price > 20:
+            tone = "🔴 **Risk-off morning** — futures red, VIX elevated. Reduce size, protect capital, watch key support."
+        elif vix_price > 25:
+            tone = "⚠️ **High vol regime** — VIX > 25. Wider stops, smaller size. Expect whipsaws in both directions."
+        elif abs(spy_change) < 0.2:
+            tone = "🟡 **Coiled open** — tight pre-market. Wait for the first 15-min range before taking sides."
+        else:
+            direction = "higher" if spy_change > 0 else "lower"
+            tone = f"🟡 **Modest {direction} open** — confirm direction at the bell before committing full size."
+    elif vix_price and vix_price > 25:
+        tone = "⚠️ **High vol regime** — VIX > 25. Size down across the board."
     else:
-        lines.append("  *No major releases today.*")
+        tone = "🟡 **Await open** — watch the first 15-min candle for directional bias."
 
-    lines.append("\n*Prep your levels. Manage your risk. Let's eat.* 🍜👑")
-    return "\n".join(lines)
+    if high_impact_today:
+        ev = high_impact_today[0]
+        tone += f"\n🚨 **{ev[1]}** at {ev[0]} — major catalyst, expect a volatility spike around this release."
+
+    # ── Message 1: Overview + Tone ────────────────────────────────────────────
+    m1 = [f"☀️ **Good Morning, Kitchen — {date_str}**\n"]
+    m1.append("**🌍 Futures / Index Check:**")
+    for name, ticker, price, pre_price, pre_change, reg_change in index_rows:
+        if pre_change is not None and pre_price:
+            m1.append(f"• **{name}** ({ticker}): Pre-mkt {fmt(pre_price)} ({pct(pre_change)})")
+        elif price is not None and reg_change is not None:
+            m1.append(f"• **{name}** ({ticker}): {fmt(price)} ({pct(reg_change)})")
+    if vix_price:
+        vix_emoji = "🟢" if vix_price < 18 else "🟡" if vix_price < 25 else "🔴"
+        vix_label = "Low vol — clear skies" if vix_price < 18 else "Caution zone" if vix_price < 25 else "HIGH VOL — size down"
+        m1.append(f"• **VIX**: {vix_emoji} {vix_price:.2f} *({vix_label})*")
+
+    if fg_value is not None:
+        fg_emoji = "😱" if fg_value <= 25 else "😰" if fg_value <= 45 else "😐" if fg_value <= 55 else "😊" if fg_value <= 75 else "🤑"
+        m1.append(f"\n**🌡️ Market Sentiment:** {fg_emoji} Fear & Greed **{fg_value}/100** — *{fg_label}*")
+
+    m1.append(f"\n**🎯 Tone for Today:**\n{tone}")
+
+    # ── Message 2: Catalysts ──────────────────────────────────────────────────
+    m2 = ["**📈 Pre-Market Movers:**"]
+    if gainers:
+        m2.append("🟢 Gainers:")
+        for t, p, c in gainers:
+            m2.append(f"  • **{t}** — {fmt(p)} ({pct(c)})")
+    if losers:
+        m2.append("🔴 Losers:")
+        for t, p, c in losers:
+            m2.append(f"  • **{t}** — {fmt(p)} ({pct(c)})")
+    if not gainers and not losers:
+        m2.append("  *Flat pre-market — no major movers yet.*")
+
+    m2.append("\n**📅 Key Events Today:**")
+    if events:
+        for ev_time, ev_name, actual, forecast, prev in events[:6]:
+            time_part = f"**{ev_time}** — " if ev_time else ""
+            flag = " 🚨" if any(kw in ev_name.lower() for kw in HIGH_IMPACT_KEYWORDS) else ""
+            m2.append(f"  • {time_part}**{ev_name}**{flag}  (Exp: {forecast} | Prev: {prev})")
+    else:
+        m2.append("  *No major economic releases scheduled today.*")
+
+    if earnings_today:
+        m2.append("\n**📣 Earnings Today:**")
+        for e in earnings_today:
+            m2.append(f"  • {e}")
+
+    # ── Message 3: Levels + What to Watch ────────────────────────────────────
+    m3 = []
+    if spy_levels:
+        m3.append("**🎯 SPY Daily Pivot Levels:**")
+        m3.append(f"  R2: **{fmt(spy_levels['r2'])}**  |  R1: **{fmt(spy_levels['r1'])}**")
+        m3.append(f"  ⚡ Pivot: **{fmt(spy_levels['pivot'])}**")
+        m3.append(f"  S1: **{fmt(spy_levels['s1'])}**  |  S2: **{fmt(spy_levels['s2'])}**")
+        m3.append("")
+
+    m3.append("**🔑 What to Watch:**")
+    if spy_levels:
+        m3.append(f"• SPY above pivot **{fmt(spy_levels['pivot'])}** = bulls in control; break below = shift defensive")
+    if vix_price:
+        if vix_price < 18:
+            m3.append("• VIX calm — trending/momentum strategies favored; don't overthink entries")
+        elif vix_price < 25:
+            m3.append("• VIX elevated — wait for confirmation before entries; don't chase opens")
+        else:
+            m3.append("• VIX spiking — breakouts fail more; mean-reversion setups in play; keep stops wide")
+    if gainers:
+        top = gainers[0]
+        m3.append(f"• **{top[0]}** leading pre-mkt at {pct(top[2])} — check for news/catalyst before fading or chasing")
+    if losers:
+        bot = losers[0]
+        m3.append(f"• **{bot[0]}** off {pct(bot[2])} pre-mkt — gap fill potential; watch prior day support")
+    if high_impact_today:
+        ev = high_impact_today[0]
+        m3.append(f"• Avoid new positions into **{ev[1]}** ({ev[0]}) — wait for the number, then react")
+    if earnings_today:
+        tickers_str = ", ".join(earnings_today[:3])
+        m3.append(f"• Earnings in play today: **{tickers_str}** — size accordingly into close")
+    if not gainers and not losers and not high_impact_today and not earnings_today:
+        m3.append("• No major catalysts flagged — standard session, trade your levels and manage size")
+
+    m3.append("\n*Prep your levels. Manage your risk. Let's eat.* 🍜👑")
+
+    return ["\n".join(m1), "\n".join(m2), "\n".join(m3)]
 
 
 # ─── NEWS SCANNER ───
@@ -1024,11 +1127,13 @@ async def daily_market_prep():
         print(f"Channel #{JARVIS_CALENDAR_CHANNEL} not found for daily prep")
         return
     try:
-        prep = await asyncio.to_thread(build_market_prep)
-        if len(prep) > 2000:
-            prep = prep[:1997] + "..."
-        await channel.send(prep)
-        print(f"Posted daily market prep to #{channel.name}")
+        messages = await asyncio.to_thread(build_market_prep)
+        for msg in messages:
+            if len(msg) > 2000:
+                msg = msg[:1997] + "..."
+            await channel.send(msg)
+            await asyncio.sleep(0.5)
+        print(f"Posted daily market prep ({len(messages)} messages) to #{channel.name}")
     except Exception as e:
         print(f"Failed to post daily prep: {e}")
 
@@ -1291,17 +1396,30 @@ async def on_message(message):
         try:
             async with message.channel.typing():
                 result = await asyncio.to_thread(MARKET_COMMANDS[cmd_name], cmd_args)
-            if len(result) > 2000:
-                result = result[:1997] + "..."
+            # build_market_prep returns a list; all other commands return a string
+            msgs = result if isinstance(result, list) else [result]
+            msgs = [m[:1997] + "..." if len(m) > 2000 else m for m in msgs]
+
             target_channel_name = COMMAND_ROUTING.get(cmd_name)
             target_channel = None
             if target_channel_name and message.channel.name != target_channel_name:
                 target_channel = discord.utils.get(message.guild.text_channels, name=target_channel_name)
+
             if target_channel:
-                await target_channel.send(f"*Requested by {message.author.mention} in #{message.channel.name}*\n\n{result}")
+                for i, msg in enumerate(msgs):
+                    prefix = f"*Requested by {message.author.mention} in #{message.channel.name}*\n\n" if i == 0 else ""
+                    await target_channel.send(prefix + msg)
+                    if len(msgs) > 1:
+                        await asyncio.sleep(0.5)
                 await message.reply(f"✅ Output posted to {target_channel.mention}", mention_author=False)
             else:
-                await message.reply(result, mention_author=False)
+                for i, msg in enumerate(msgs):
+                    if i == 0:
+                        await message.reply(msg, mention_author=False)
+                    else:
+                        await message.channel.send(msg)
+                    if len(msgs) > 1:
+                        await asyncio.sleep(0.5)
         except Exception as e:
             print(f"Command error: {e}")
             await message.reply(f"❌ Something went wrong running that command.", mention_author=False)
