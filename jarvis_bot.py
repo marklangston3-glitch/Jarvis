@@ -28,6 +28,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GUILD_ID = 1513190467796336830
 RULES_CHANNEL_NAME = "rules"
 DAILY_CHANNEL_NAME = "watchlist"
+WELCOME_CHANNEL_NAME = "welcome"
 VERIFY_EMOJI = "✅"
 FREE_MEMBER_ROLE = "Free Member"
 UNVERIFIED_ROLE = "Unverified"
@@ -1356,6 +1357,14 @@ async def on_member_join(member):
     if role:
         await member.add_roles(role)
         print(f"Assigned {UNVERIFIED_ROLE} role to {member}")
+
+    welcome_ch = discord.utils.get(member.guild.text_channels, name=WELCOME_CHANNEL_NAME)
+    if welcome_ch:
+        await welcome_ch.send(
+            f"👑 Welcome to The Soup Kitchen, {member.mention}! "
+            f"Head over to <#rules> and react with ✅ to unlock the free channels. "
+            f"Good trades feed everyone. 🍜"
+        )
 
 
 @client.event
