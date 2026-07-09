@@ -1420,6 +1420,25 @@ async def on_message(message):
         await message.reply(HELP_TEXT, mention_author=False)
         return
 
+    # ── Test content slot: @Jarvis testpost [slot_name] ──────────────────────────
+    if content_lower.startswith("testpost"):
+        parts_tp = content.split(None, 1)
+        slot_arg = parts_tp[1].strip().lower() if len(parts_tp) > 1 else ""
+        slot_names = [s["name"] for s in _SLOTS]
+        match = next((s for s in _SLOTS if s["name"] == slot_arg), None)
+        if not match:
+            # Show available slots
+            listing = "\n".join(f"• `{s['name']}`  →  #{s['target']}" for s in _SLOTS)
+            await message.reply(
+                f"**Usage:** `@Jarvis testpost <slot_name>`\n\n**Available slots:**\n{listing}",
+                mention_author=False,
+            )
+            return
+        await message.reply(f"⏳ Generating test post for `{match['name']}`…", mention_author=False)
+        await _fire_slot(match)
+        return
+    # ─────────────────────────────────────────────────────────────────────────────
+
     for cmd, response in STATIC_COMMANDS.items():
         if content_lower == cmd:
             await message.reply(response, mention_author=False)
