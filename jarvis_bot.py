@@ -1471,5 +1471,433 @@ async def on_message(message):
         print(f"Reply error: {e}")
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── AI CONTENT GENERATION & APPROVAL SYSTEM ───────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import logging
+import schedule as _schedule
+import threading
+import pytz
+import time as _time
+from typing import Optional
+
+# ── Logging ─────────────────────────────────────────────────────────────────────
+_log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_fh = logging.FileHandler("jarvis_bot.log")
+_fh.setFormatter(_log_fmt)
+_sh = logging.StreamHandler()
+_sh.setFormatter(_log_fmt)
+jarvis_log = logging.getLogger("jarvis_content")
+jarvis_log.setLevel(logging.INFO)
+jarvis_log.addHandler(_fh)
+jarvis_log.addHandler(_sh)
+
+# ── Constants ────────────────────────────────────────────────────────────────────
+_ET = pytz.timezone("America/New_York")
+_FALLBACK = "The kitchen is open. Stay disciplined, manage your risk, and trust your levels. 🍜"
+_MOD_CHANNEL = "mod-chat"
+_AUTO_DELAY = 45 * 60  # seconds
+
+_bot_loop = None
+_last_fired: dict = {}  # "slot_name_YYYY-MM-DD" → True
+
+
+# ── Slot definitions ─────────────────────────────────────────────────────────────
+_SLOTS = [
+    {
+        "name": "morning_prep",
+        "weekdays": [0, 1, 2, 3, 4],
+        "hour": 8, "minute": 0,
+        "target": "daily-levels",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis, the voice of The Soup Kitchen trading Discord. "
+            "Write a pre-market preparation post. Disciplined, sharp, professional with edge. "
+            "Focus on mindset and preparation before the open. Vary the angle every day — "
+            "some days focus on patience, some on aggression, some on risk management. "
+            "End with 🍜. Max 4 sentences."
+        ),
+    },
+    {
+        "name": "midday_checkin",
+        "weekdays": [0, 1, 2, 3, 4],
+        "hour": 11, "minute": 30,
+        "target": "market-talk",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a midday market check-in post. The market has been open 2 hours. "
+            "Prompt members to share how their morning trades went, what they are seeing intraday, "
+            "and whether the market is trending or choppy. Vary the tone — some days energetic, "
+            "some days cautious. End with 🍜. Max 4 sentences."
+        ),
+    },
+    {
+        "name": "market_close",
+        "weekdays": [0, 1, 2, 3, 4],
+        "hour": 16, "minute": 5,
+        "target": "daily-levels",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a market close recap post. The trading day just ended. "
+            "Prompt members to share their PnL, one thing they did well, and one thing to improve. "
+            "Remind them that posting losses builds more trust than hiding them. "
+            "Vary the closing energy — some days reflective, some days fired up. End with 🍜. Max 4 sentences."
+        ),
+    },
+    {
+        "name": "weekly_poll",
+        "weekdays": [0],  # Monday only
+        "hour": 9, "minute": 35,
+        "target": "market-talk",
+        "approval": False,
+        "poll": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a Monday market sentiment poll question asking members their directional bias for the week. "
+            "Return only the poll question text, nothing else. Keep it under 15 words."
+        ),
+    },
+    {
+        "name": "kitchen_fundamentals",
+        "weekdays": [0],  # Monday only
+        "hour": 10, "minute": 0,
+        "target": "playbook",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a Kitchen Fundamentals educational post. Teach one trading or options concept in plain English. "
+            "Rotate through these concepts week by week — IV rank, open interest vs volume, bull call spreads, "
+            "max pain theory, theta decay, delta and gamma, support and resistance, market structure, "
+            "0DTE strategy, risk management, earnings plays, sector rotation, reading options chains, "
+            "tape reading, pre-market prep. 4-6 sentences max. End with 🍜 #KitchenFundamentals."
+        ),
+    },
+    {
+        "name": "midweek_engagement",
+        "weekdays": [2],  # Wednesday only
+        "hour": 11, "minute": 0,
+        "target": "general-chat",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a midweek community engagement post. Rotate between these three formats — "
+            "1) Would you take this trade? with a hypothetical setup, "
+            "2) A trading psychology or mindset question, "
+            "3) A weekly challenge for members to complete and report back on Friday. "
+            "Make it conversational and engaging. End with 🍜. Max 4 sentences."
+        ),
+    },
+    {
+        "name": "friday_recap",
+        "weekdays": [4],  # Friday only
+        "hour": 16, "minute": 10,
+        "target": "trade-recaps",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a Friday end of week recap post. The trading week is done. "
+            "Prompt members to share their week — wins, losses, biggest lesson. "
+            "Remind them the best traders document everything. "
+            "Make it feel like a locker room debrief after a game. End with 🍜. Max 4 sentences."
+        ),
+    },
+    {
+        "name": "sunday_prep",
+        "weekdays": [6],  # Sunday only
+        "hour": 19, "minute": 0,
+        "target": "daily-levels",
+        "approval": True,
+        "prompt": (
+            "You are Jarvis for The Soup Kitchen trading Discord. "
+            "Write a Sunday evening prep post. Market opens tomorrow. "
+            "Prompt members to review their watchlist, set their key levels tonight, and come in with a plan. "
+            "Vary the energy — some Sundays calm and methodical, some fired up. End with 🍜. Max 4 sentences."
+        ),
+    },
+]
+
+
+# ── Content generation ────────────────────────────────────────────────────────────
+
+async def _gen_content(prompt: str) -> str:
+    """Call Claude API to generate a post. Returns fallback on failure."""
+    try:
+        def _call():
+            return claude_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=300,
+                system=prompt,
+                messages=[{"role": "user", "content": "Generate the post now."}],
+            )
+        resp = await asyncio.to_thread(_call)
+        text = resp.content[0].text.strip()
+        jarvis_log.info(f"Generated {len(text)} chars")
+        return text
+    except Exception as exc:
+        jarvis_log.error(f"Anthropic API error: {exc}")
+        return _FALLBACK
+
+
+async def _send_content(channel_name: str, text: str) -> bool:
+    """Post text to a channel by name."""
+    guild = client.get_guild(GUILD_ID)
+    ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
+    if not ch:
+        jarvis_log.error(f"Channel #{channel_name} not found — cannot post")
+        return False
+    await ch.send(text)
+    jarvis_log.info(f"Posted to #{channel_name}: {text[:60]}...")
+    return True
+
+
+async def _send_poll_post(channel_name: str, question: str):
+    """Post a Discord poll (with reaction fallback)."""
+    guild = client.get_guild(GUILD_ID)
+    ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
+    if not ch:
+        jarvis_log.error(f"Poll channel #{channel_name} not found")
+        return
+    try:
+        poll = discord.Poll(question=question, duration=timedelta(hours=24))
+        poll.add_answer(text="Bullish 🟢")
+        poll.add_answer(text="Bearish 🔴")
+        poll.add_answer(text="Neutral ⚪")
+        poll.add_answer(text="Waiting for confirmation 👀")
+        await ch.send(poll=poll)
+        jarvis_log.info(f"Poll posted to #{channel_name}: {question}")
+    except Exception as exc:
+        jarvis_log.warning(f"Native poll unavailable ({exc}), using reaction fallback")
+        msg = await ch.send(
+            f"🗳️ **Weekly Bias Poll**\n{question}\n\n"
+            "🟢 Bullish  •  🔴 Bearish  •  ⚪ Neutral  •  👀 Waiting for confirmation"
+        )
+        for emoji in ["🟢", "🔴", "⚪", "👀"]:
+            await msg.add_reaction(emoji)
+        jarvis_log.info(f"Reaction poll posted to #{channel_name}")
+
+
+# ── Approval UI ───────────────────────────────────────────────────────────────────
+
+class _EditModal(discord.ui.Modal, title="Edit Post"):
+    revised = discord.ui.TextInput(
+        label="Revised Content",
+        style=discord.TextStyle.paragraph,
+        max_length=2000,
+        required=True,
+    )
+
+    def __init__(self, view: "ApprovalView"):
+        super().__init__()
+        self._view = view
+        self.revised.default = view.content[:4000]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        v = self._view
+        if v.done:
+            now = datetime.now(_ET).strftime("%I:%M %p ET")
+            await interaction.response.send_message(
+                f"⚠️ Already auto-posted to #{v.target} at {now}. No action taken.",
+                ephemeral=True,
+            )
+            return
+        v.done = True
+        if v.timer and not v.timer.done():
+            v.timer.cancel()
+        await interaction.response.defer()
+        edited = self.revised.value.strip()
+        await _send_content(v.target, edited)
+        now = datetime.now(_ET).strftime("%I:%M %p ET")
+        jarvis_log.info(f"EDIT: {v.slot_name} → #{v.target} at {now}")
+        if v.mod_msg:
+            try:
+                await v.mod_msg.edit(
+                    content=v.mod_msg.content + f"\n\n✏️ Edited and posted to #{v.target} at {now}",
+                    view=None,
+                )
+            except Exception as exc:
+                jarvis_log.error(f"mod_msg edit error: {exc}")
+
+
+class ApprovalView(discord.ui.View):
+    def __init__(self, content: str, target: str, slot_name: str, sched_time: str):
+        super().__init__(timeout=None)
+        self.content = content
+        self.target = target
+        self.slot_name = slot_name
+        self.sched_time = sched_time
+        self.done = False
+        self.timer: Optional[asyncio.Task] = None
+        self.mod_msg: Optional[discord.Message] = None
+
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.green)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            now = datetime.now(_ET).strftime("%I:%M %p ET")
+            await interaction.response.send_message(
+                f"⚠️ Already auto-posted to #{self.target} at {now}. No action taken.",
+                ephemeral=True,
+            )
+            return
+        self.done = True
+        if self.timer and not self.timer.done():
+            self.timer.cancel()
+        await interaction.response.defer()
+        await _send_content(self.target, self.content)
+        now = datetime.now(_ET).strftime("%I:%M %p ET")
+        jarvis_log.info(f"APPROVED: {self.slot_name} → #{self.target} at {now}")
+        if self.mod_msg:
+            try:
+                await self.mod_msg.edit(
+                    content=self.mod_msg.content + f"\n\n✅ Posted to #{self.target} at {now}",
+                    view=None,
+                )
+            except Exception as exc:
+                jarvis_log.error(f"mod_msg edit error: {exc}")
+
+    @discord.ui.button(label="✏️ Edit", style=discord.ButtonStyle.blurple)
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            now = datetime.now(_ET).strftime("%I:%M %p ET")
+            await interaction.response.send_message(
+                f"⚠️ Already auto-posted to #{self.target} at {now}. No action taken.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(_EditModal(self))
+
+
+async def _auto_post_timer(view: ApprovalView):
+    """Wait 45 min then auto-post if not already handled."""
+    await asyncio.sleep(_AUTO_DELAY)
+    if view.done:
+        return
+    view.done = True
+    await _send_content(view.target, view.content)
+    now = datetime.now(_ET).strftime("%I:%M %p ET")
+    jarvis_log.info(f"AUTO-POST: {view.slot_name} → #{view.target} (45 min timeout)")
+    if view.mod_msg:
+        try:
+            await view.mod_msg.edit(
+                content=view.mod_msg.content
+                + f"\n\n⏰ Auto-posted to #{view.target} after 45 min — no approval received",
+                view=None,
+            )
+        except Exception as exc:
+            jarvis_log.error(f"mod_msg edit error after auto-post: {exc}")
+
+
+async def _request_approval(content: str, slot: dict):
+    """Send content to #mod-chat with Approve / Edit buttons."""
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    mod_ch = discord.utils.get(guild.text_channels, name=_MOD_CHANNEL)
+    if not mod_ch:
+        jarvis_log.error(f"#{_MOD_CHANNEL} not found — direct-posting {slot['name']}")
+        await _send_content(slot["target"], content)
+        return
+
+    admin_role = discord.utils.get(guild.roles, name="Admin")
+    mention = admin_role.mention if admin_role else "@Admin"
+    now = datetime.now(_ET).strftime("%I:%M %p ET")
+
+    view = ApprovalView(content, slot["target"], slot["name"], now)
+    body = (
+        f"{mention}\n"
+        f"📋 **PENDING APPROVAL**\n"
+        f"Target channel: #{slot['target']}\n"
+        f"Scheduled time: {now}\n\n"
+        f"{content}"
+    )
+    mod_msg = await mod_ch.send(body, view=view)
+    view.mod_msg = mod_msg
+    view.timer = asyncio.create_task(_auto_post_timer(view))
+    jarvis_log.info(f"PENDING: {slot['name']} → #{_MOD_CHANNEL} (45 min countdown started)")
+
+
+# ── Slot dispatcher ───────────────────────────────────────────────────────────────
+
+async def _fire_slot(slot: dict):
+    now_str = datetime.now(_ET).strftime("%I:%M %p ET")
+    jarvis_log.info(f"SLOT: {slot['name']} firing at {now_str}")
+    content = await _gen_content(slot["prompt"])
+    jarvis_log.info(f"CONTENT [{slot['name']}]: {content[:80]}...")
+
+    if slot.get("poll"):
+        await _send_poll_post(slot["target"], content)
+    elif slot.get("approval"):
+        await _request_approval(content, slot)
+    else:
+        await _send_content(slot["target"], content)
+        jarvis_log.info(f"DIRECT: {slot['name']} → #{slot['target']}")
+
+
+# ── Schedule thread ───────────────────────────────────────────────────────────────
+
+def _make_job(slot: dict):
+    """Return a schedule-compatible job that fires only at the correct ET time/day."""
+    def _job():
+        now = datetime.now(_ET)
+        if now.weekday() not in slot["weekdays"]:
+            return
+        if now.hour != slot["hour"] or now.minute != slot["minute"]:
+            return
+        key = f"{slot['name']}_{now.date()}"
+        if _last_fired.get(key):
+            return
+        _last_fired[key] = True
+        if _bot_loop:
+            asyncio.run_coroutine_threadsafe(_fire_slot(slot), _bot_loop)
+    return _job
+
+
+def _start_content_scheduler():
+    _schedule.clear("content")
+    _DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    lines = [f"{'NAME':<26} {'TIME (ET)':<10} {'DAYS':<15} {'TARGET':<20} TYPE"]
+    lines.append("─" * 80)
+    for slot in _SLOTS:
+        _schedule.every(1).minutes.do(_make_job(slot)).tag("content")
+        days = "/".join(_DAY[d] for d in slot["weekdays"])
+        kind = "poll" if slot.get("poll") else ("approval" if slot.get("approval") else "direct")
+        lines.append(
+            f"{slot['name']:<26} "
+            f"{slot['hour']:02d}:{slot['minute']:02d} ET   "
+            f"{days:<15} "
+            f"#{slot['target']:<19} {kind}"
+        )
+    for line in lines:
+        jarvis_log.info(line)
+        print(f"[Content] {line}")
+
+    def _runner():
+        while True:
+            _schedule.run_pending()
+            _time.sleep(30)
+
+    t = threading.Thread(target=_runner, daemon=True, name="jarvis-content-scheduler")
+    t.start()
+    jarvis_log.info("Content scheduler thread started (polling every 30s)")
+    return t
+
+
+_prev_on_ready = client.on_ready  # capture existing handler
+
+
+@client.event
+async def on_ready():
+    """Chains the original on_ready then starts the content system."""
+    await _prev_on_ready()
+    global _bot_loop
+    _bot_loop = asyncio.get_event_loop()
+    _start_content_scheduler()
+    jarvis_log.info(f"═══ Content system online — {len(_SLOTS)} slots registered ═══")
+    print(f"[Content] System online — {len(_SLOTS)} slots registered")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
