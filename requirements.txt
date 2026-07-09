@@ -3,3 +3,5 @@ anthropic>=0.52.0
 yfinance>=0.2.40
 requests>=2.31.0
 lxml>=5.0.0
+schedule>=1.2.0
+pytz>=2024.1
