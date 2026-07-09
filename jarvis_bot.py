@@ -1420,6 +1420,24 @@ async def on_message(message):
         await message.reply(HELP_TEXT, mention_author=False)
         return
 
+    # ── Test content slot: @Jarvis testpost [slot_name] ──────────────────────────
+    if content_lower.startswith("testpost"):
+        parts_tp = content.split(None, 1)
+        slot_arg = parts_tp[1].strip().lower() if len(parts_tp) > 1 else ""
+        slot_names = [s["name"] for s in _SLOTS]
+        match = next((s for s in _SLOTS if s["name"] == slot_arg), None)
+        if not match:
+            listing = "\n".join(f"• `{s['name']}`  →  #{s['target']}" for s in _SLOTS)
+            await message.reply(
+                f"**Usage:** `@Jarvis testpost <slot_name>`\n\n**Available slots:**\n{listing}",
+                mention_author=False,
+            )
+            return
+        await message.reply(f"⏳ Generating test post for `{match['name']}`…", mention_author=False)
+        await _fire_slot(match)
+        return
+    # ─────────────────────────────────────────────────────────────────────────────
+
     for cmd, response in STATIC_COMMANDS.items():
         if content_lower == cmd:
             await message.reply(response, mention_author=False)
@@ -1469,6 +1487,8 @@ async def on_message(message):
         await message.reply(ai_reply, mention_author=False)
     except Exception as e:
         print(f"Reply error: {e}")
+
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1857,19 +1877,21 @@ def _make_job(slot: dict):
 def _start_content_scheduler():
     _schedule.clear("content")
     _DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    print("[Content] Scheduled slots:")
+    lines = [f"{'NAME':<26} {'TIME (ET)':<10} {'DAYS':<15} {'TARGET':<20} TYPE"]
+    lines.append("─" * 80)
     for slot in _SLOTS:
         _schedule.every(1).minutes.do(_make_job(slot)).tag("content")
         days = "/".join(_DAY[d] for d in slot["weekdays"])
         kind = "poll" if slot.get("poll") else ("approval" if slot.get("approval") else "direct")
-        line = (
-            f"  ⏰ {slot['name']:<26} "
-            f"{slot['hour']:02d}:{slot['minute']:02d} ET  "
-            f"({days:<15})  "
-            f"→ #{slot['target']:<20}  [{kind}]"
+        lines.append(
+            f"{slot['name']:<26} "
+            f"{slot['hour']:02d}:{slot['minute']:02d} ET   "
+            f"{days:<15} "
+            f"#{slot['target']:<19} {kind}"
         )
+    for line in lines:
         jarvis_log.info(line)
-        print(f"[Content]{line}")
+        print(f"[Content] {line}")
 
     def _runner():
         while True:
@@ -1879,6 +1901,7 @@ def _start_content_scheduler():
     t = threading.Thread(target=_runner, daemon=True, name="jarvis-content-scheduler")
     t.start()
     jarvis_log.info("Content scheduler thread started (polling every 30s)")
+    return t
 
 
 _prev_on_ready = client.on_ready  # capture existing handler
