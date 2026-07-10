@@ -1661,10 +1661,16 @@ async def _gen_content(prompt: str) -> str:
         return _FALLBACK
 
 
+_DAILY_LEVELS_FALLBACK = "market-talk"
+
 async def _send_content(channel_name: str, text: str) -> bool:
-    """Post text to a channel by name."""
+    """Post text to a channel by name, falling back to #market-talk for #daily-levels."""
     guild = client.get_guild(GUILD_ID)
     ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
+    if not ch and channel_name == "daily-levels":
+        jarvis_log.warning(f"#daily-levels not found — falling back to #{_DAILY_LEVELS_FALLBACK}")
+        channel_name = _DAILY_LEVELS_FALLBACK
+        ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
     if not ch:
         jarvis_log.error(f"Channel #{channel_name} not found — cannot post")
         return False
@@ -1743,7 +1749,7 @@ class _EditModal(discord.ui.Modal, title="Edit Post"):
 
 class ApprovalView(discord.ui.View):
     def __init__(self, content: str, target: str, slot_name: str, sched_time: str):
-        super().__init__(timeout=None)
+        super().__init__(timeout=3600)
         self.content = content
         self.target = target
         self.slot_name = slot_name
@@ -1751,6 +1757,23 @@ class ApprovalView(discord.ui.View):
         self.done = False
         self.timer: Optional[asyncio.Task] = None
         self.mod_msg: Optional[discord.Message] = None
+
+    async def on_timeout(self):
+        if self.done:
+            return
+        self.done = True
+        await _send_content(self.target, self.content)
+        now = datetime.now(_ET).strftime("%I:%M %p ET")
+        jarvis_log.info(f"VIEW TIMEOUT: {self.slot_name} → #{self.target}")
+        if self.mod_msg:
+            try:
+                await self.mod_msg.edit(
+                    content=self.mod_msg.content
+                    + f"\n\n⏰ Auto-posted to #{self.target} after 60 min — view timed out",
+                    view=None,
+                )
+            except Exception as exc:
+                jarvis_log.error(f"mod_msg edit error on view timeout: {exc}")
 
     @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.green)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1824,15 +1847,18 @@ async def _request_approval(content: str, slot: dict):
     mention = admin_role.mention if admin_role else "@Admin"
     now = datetime.now(_ET).strftime("%I:%M %p ET")
 
-    view = ApprovalView(content, slot["target"], slot["name"], now)
-    body = (
-        f"{mention}\n"
-        f"📋 **PENDING APPROVAL**\n"
-        f"Target channel: #{slot['target']}\n"
-        f"Scheduled time: {now}\n\n"
-        f"{content}"
+    embed = discord.Embed(
+        title="📋 Pending Approval",
+        description=content,
+        color=discord.Color.orange(),
     )
-    mod_msg = await mod_ch.send(body, view=view)
+    embed.add_field(name="Target", value=f"#{slot['target']}", inline=True)
+    embed.add_field(name="Scheduled", value=now, inline=True)
+    embed.add_field(name="Slot", value=slot["name"], inline=True)
+    embed.set_footer(text="Auto-posts in 45 min if no action taken.")
+
+    view = ApprovalView(content, slot["target"], slot["name"], now)
+    mod_msg = await mod_ch.send(content=mention, embed=embed, view=view)
     view.mod_msg = mod_msg
     view.timer = asyncio.create_task(_auto_post_timer(view))
     jarvis_log.info(f"PENDING: {slot['name']} → #{_MOD_CHANNEL} (45 min countdown started)")
