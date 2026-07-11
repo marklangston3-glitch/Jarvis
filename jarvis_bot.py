@@ -2312,7 +2312,20 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
         guild = client.get_guild(GUILD_ID)
         if not guild:
             return
-        ch = _ch(guild, _LIVE_CALLS_CHANNEL)
+        # Find or create #markys-alerts in the paid alerts category
+        ch = discord.utils.get(guild.text_channels, name="markys-alerts")
+        if not ch:
+            try:
+                category = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
+                ch = await guild.create_text_channel(
+                    "markys-alerts",
+                    category=category,
+                    topic="Marky's live trade signals — Langston Volatility Capture. 🍜",
+                )
+                jarvis_log.info("Created #markys-alerts channel")
+            except Exception as exc:
+                jarvis_log.error(f"Could not create #markys-alerts: {exc}")
+                ch = _ch(guild, _LIVE_CALLS_CHANNEL)  # fallback
         if not ch:
             return
         msg = await ch.send(body)
