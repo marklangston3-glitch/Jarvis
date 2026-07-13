@@ -2355,14 +2355,17 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
 
 async def _start_webhook_server():
     try:
+        port = int(os.environ.get("PORT", 8080))
         app = _aiohttp_web.Application()
         app.router.add_post("/webhook", _handle_tv_webhook)
+        # Also accept POST on / so Railway health checks and direct-root POSTs work
+        app.router.add_post("/", _handle_tv_webhook)
         runner = _aiohttp_web.AppRunner(app)
         await runner.setup()
-        site = _aiohttp_web.TCPSite(runner, "0.0.0.0", 8080)
+        site = _aiohttp_web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
-        jarvis_log.info("TradingView webhook server listening on 0.0.0.0:8080")
-        print("[Webhook] Server online — 0.0.0.0:8080/webhook")
+        jarvis_log.info(f"TradingView webhook server listening on 0.0.0.0:{port}")
+        print(f"[Webhook] Server online — 0.0.0.0:{port}/webhook  (PORT={port})")
     except Exception as exc:
         jarvis_log.error(f"Webhook server failed to start: {exc}")
         print(f"[Webhook] Failed to start: {exc}")
