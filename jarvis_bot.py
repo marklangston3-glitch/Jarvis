@@ -2569,16 +2569,89 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FEATURE 8 — Auto-moderator
+# FEATURE 8 — Auto-moderator (revised rules)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Exempt (no automod at all):  Admin, Moderator, Paid Member
+# Free Member:                 loosened rules (see below)
+# Unverified:                  strictest treatment
+#
+# DELETE triggers:
+#   • Link + banned phrase together  (classic spam combo, any account)
+#   • Link posted by Unverified account
+#   • Banned phrase posted by Unverified account
+#   • 10+ identical chars in a row (any non-exempt account)
+#
+# MOD-LOG (no delete, human decides):
+#   • Link alone from a Free Member
+#   • Banned phrase alone from a Free Member
 # ─────────────────────────────────────────────────────────────────────────────
 
-_AUTOMOD_EXEMPT = {"Admin", "Moderator"}
-_BANNED_PHRASES = ["dm me", "check my profile", "free signals", "guaranteed profit", "100% win rate"]
-_RE_LINK  = re.compile(r"https?://", re.IGNORECASE)
-_RE_SPAM  = re.compile(r"(.)\1{4,}")  # 5+ identical chars in a row
+_AUTOMOD_FULL_EXEMPT = {"Admin", "Moderator", "Paid Member"}
+_AUTOMOD_UNVERIFIED  = "Unverified"
+_BOT_LOGS_CHANNEL    = "bot-logs"
 
-def _automod_exempt(member: discord.Member) -> bool:
-    return any(r.name in _AUTOMOD_EXEMPT for r in member.roles)
+_BANNED_PHRASES = [
+    "dm me", "check my profile", "free signals", "guaranteed profit", "100% win rate"
+]
+_RE_LINK = re.compile(r"https?://", re.IGNORECASE)
+_RE_SPAM = re.compile(r"(.)\1{9,}")  # 10+ identical chars in a row
+
+
+def _automod_tier(member: discord.Member) -> str:
+    """Return 'exempt', 'unverified', or 'free'."""
+    role_names = {r.name for r in member.roles}
+    if role_names & _AUTOMOD_FULL_EXEMPT:
+        return "exempt"
+    if _AUTOMOD_UNVERIFIED in role_names:
+        return "unverified"
+    return "free"
+
+
+async def _automod_delete(message: discord.Message, reason: str):
+    try:
+        await message.delete()
+        jarvis_log.info(
+            f"AUTOMOD DELETE [{reason}] {message.author} "
+            f"in #{message.channel.name}: {message.content[:80]}"
+        )
+        await message.author.send(
+            "🚫 Your message was removed in The Soup Kitchen.\n"
+            "No unsolicited links or promotional content. Keep it clean. 🍜"
+        )
+    except discord.Forbidden:
+        jarvis_log.warning(f"AUTOMOD: could not delete/DM {message.author}")
+    except Exception as exc:
+        jarvis_log.error(f"AUTOMOD delete error: {exc}")
+
+
+async def _automod_flag(message: discord.Message, reason: str):
+    """Post a note in #bot-logs for a human mod to review — do NOT delete."""
+    guild = message.guild
+    log_ch = discord.utils.get(guild.text_channels, name=_BOT_LOGS_CHANNEL)
+    if not log_ch:
+        log_ch = _ch(guild, "mod-chat")  # fallback if bot-logs doesn't exist
+    if not log_ch:
+        jarvis_log.warning(f"AUTOMOD FLAG [{reason}]: no log channel found")
+        return
+    try:
+        mod_role = discord.utils.get(guild.roles, name="Moderator")
+        mention  = mod_role.mention if mod_role else "@Moderator"
+        await log_ch.send(
+            f"🟡 **AUTOMOD FLAG** — {mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**User:** {message.author.mention} ({message.author})\n"
+            f"**Channel:** {message.channel.mention}\n"
+            f"**Message:** {message.jump_url}\n"
+            f"```{message.content[:300]}```\n"
+            f"React or delete as needed — Jarvis did not remove this."
+        )
+        jarvis_log.info(
+            f"AUTOMOD FLAG [{reason}] {message.author} "
+            f"in #{message.channel.name}: {message.content[:80]}"
+        )
+    except Exception as exc:
+        jarvis_log.error(f"AUTOMOD flag error: {exc}")
 
 
 _prev_on_message_f8 = client.on_message
@@ -2594,36 +2667,38 @@ async def on_message(message):
         return
     if message.guild.id != GUILD_ID:
         return
-    if _automod_exempt(message.author):
+
+    tier = _automod_tier(message.author)
+    if tier == "exempt":
         return
 
     content = message.content
     lower   = content.lower()
-    reason  = None
 
-    if _RE_LINK.search(content):
-        reason = "link"
-    elif any(p in lower for p in _BANNED_PHRASES):
-        reason = "banned phrase"
-    elif _RE_SPAM.search(content):
-        reason = "spam repeat"
+    has_link   = bool(_RE_LINK.search(content))
+    has_phrase = any(p in lower for p in _BANNED_PHRASES)
+    has_spam   = bool(_RE_SPAM.search(content))
 
-    if not reason:
+    if has_spam:
+        # Hard delete for everyone non-exempt
+        await _automod_delete(message, "spam repeat (10+ chars)")
         return
 
-    try:
-        await message.delete()
-        jarvis_log.info(
-            f"AUTOMOD [{reason}] — {message.author} in #{message.channel.name}: {content[:80]}"
-        )
-        await message.author.send(
-            "🚫 Your message was removed in The Soup Kitchen.\n"
-            "No links or promotional content without mod approval. Keep it clean. 🍜"
-        )
-    except discord.Forbidden:
-        jarvis_log.warning(f"AUTOMOD: could not delete/DM {message.author}")
-    except Exception as exc:
-        jarvis_log.error(f"AUTOMOD error: {exc}")
+    if tier == "unverified":
+        # Stricter — delete on link OR banned phrase alone
+        if has_link:
+            await _automod_delete(message, "link (Unverified account)")
+        elif has_phrase:
+            await _automod_delete(message, "banned phrase (Unverified account)")
+        return
+
+    # Free Member — only delete when link + phrase appear together
+    if has_link and has_phrase:
+        await _automod_delete(message, "link + banned phrase combo")
+    elif has_link:
+        await _automod_flag(message, "link posted (Free Member)")
+    elif has_phrase:
+        await _automod_flag(message, "banned phrase (Free Member)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
