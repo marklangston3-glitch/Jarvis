@@ -2299,6 +2299,7 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
 
     now_str = datetime.now(_ET).strftime("%I:%M %p ET")
     body = (
+        f"@everyone\n"
         f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Action: {action} triggered at ${price}\n"
@@ -2312,6 +2313,15 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
         guild = client.get_guild(GUILD_ID)
         if not guild:
             return
+
+        # Check if Jarvis has Mention Everyone permission — log warning if not
+        me = guild.me
+        if me and not me.guild_permissions.mention_everyone:
+            jarvis_log.warning(
+                "PERMISSION WARNING: Jarvis does not have 'Mention @everyone' permission. "
+                "@everyone ping will not fire until this is granted in Server Settings → Roles → Jarvis."
+            )
+
         # Find or create #markys-alerts in the paid alerts category
         ch = discord.utils.get(guild.text_channels, name="markys-alerts")
         if not ch:
@@ -2328,7 +2338,10 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
                 ch = _ch(guild, _LIVE_CALLS_CHANNEL)  # fallback
         if not ch:
             return
-        msg = await ch.send(body)
+        msg = await ch.send(
+            body,
+            allowed_mentions=discord.AllowedMentions(everyone=True),
+        )
         try:
             await msg.create_thread(name=f"${ticker} Alert Discussion")
         except Exception as exc:
