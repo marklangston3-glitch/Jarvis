@@ -2322,19 +2322,19 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
                 "@everyone ping will not fire until this is granted in Server Settings → Roles → Jarvis."
             )
 
-        # Find or create #markys-alerts in the paid alerts category
-        ch = discord.utils.get(guild.text_channels, name="markys-alerts")
+        # Find or create #marky-alerts in the paid alerts category
+        ch = discord.utils.get(guild.text_channels, name="marky-alerts")
         if not ch:
             try:
                 category = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
                 ch = await guild.create_text_channel(
-                    "markys-alerts",
+                    "marky-alerts",
                     category=category,
                     topic="Marky's live trade signals — Langston Volatility Capture. 🍜",
                 )
-                jarvis_log.info("Created #markys-alerts channel")
+                jarvis_log.info("Created #marky-alerts channel")
             except Exception as exc:
-                jarvis_log.error(f"Could not create #markys-alerts: {exc}")
+                jarvis_log.error(f"Could not create #marky-alerts: {exc}")
                 ch = _ch(guild, _LIVE_CALLS_CHANNEL)  # fallback
         if not ch:
             return
