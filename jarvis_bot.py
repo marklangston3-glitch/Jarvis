@@ -2551,17 +2551,28 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if not ch:
         return
     try:
-        if before.channel is None and after.channel is not None:
+        joined   = before.channel is None and after.channel is not None
+        left     = before.channel is not None and after.channel is None
+        is_stage = after.channel is not None and isinstance(after.channel, discord.StageChannel)
+
+        if joined:
+            if is_stage:
+                await ch.send(
+                    "🎙️ **THE KITCHEN IS LIVE**\n"
+                    "Live trading session starting now. Pull up. 🍜👑"
+                )
+                jarvis_log.info(f"STAGE JOIN: {member.display_name} → #{after.channel.name}")
+            else:
+                await ch.send(
+                    f"🎙️ **LIVE SESSION STARTING**\n"
+                    f"{member.display_name} just joined the trading floor.\n\n"
+                    f"Get in the kitchen. 🍜👑"
+                )
+                jarvis_log.info(f"VOICE JOIN: {member.display_name} → #{after.channel.name}")
+        elif left:
             await ch.send(
-                f"🎙️ **LIVE SESSION STARTING**\n"
-                f"{member.display_name} just joined the trading floor.\n\n"
-                f"Get in the kitchen. 🍜👑"
-            )
-            jarvis_log.info(f"VOICE JOIN: {member.display_name} → #{after.channel.name}")
-        elif before.channel is not None and after.channel is None:
-            await ch.send(
-                f"📴 **Session ended.**\n"
-                f"Recap dropping in #trade-recaps shortly. 🍜"
+                "📴 **Session ended.**\n"
+                "Recap dropping in #trade-recaps shortly. 🍜"
             )
             jarvis_log.info(f"VOICE LEAVE: {member.display_name}")
     except Exception as exc:
@@ -2748,11 +2759,106 @@ async def on_interaction(interaction: discord.Interaction):
 # Final on_ready chain — sync slash commands, start webhook, start schedulers
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _setup_live_trading_stage(guild: discord.Guild):
+    """Create 💰 LIVE TRADING 💰 category with Stage + live-chat if not already present."""
+
+    # Step 1 — Verify Community is enabled (required for Stage channels)
+    if "COMMUNITY" not in guild.features:
+        jarvis_log.warning(
+            "SETUP: Guild does not have COMMUNITY feature enabled. "
+            "Stage channels require Community mode. "
+            "Enable it in Server Settings → Enable Community, then restart the bot."
+        )
+        print("[Stage] ⚠️  Community not enabled — Stage channel skipped.")
+        return
+
+    # Step 2 — Find or create the category, positioned above PAID ALERTS
+    cat_name   = "💰 LIVE TRADING 💰"
+    stage_name = "🎙️・soup-kitchen-live"
+    chat_name  = "💬・live-chat"
+
+    category = discord.utils.get(guild.categories, name=cat_name)
+    if not category:
+        # Position just above 🔒 PAID ALERTS if it exists
+        paid_cat = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
+        position = (paid_cat.position if paid_cat else 0)
+        try:
+            category = await guild.create_category(cat_name, position=position)
+            jarvis_log.info(f"SETUP: Created category '{cat_name}' at position {position}")
+            print(f"[Stage] Created category '{cat_name}'")
+        except Exception as exc:
+            jarvis_log.error(f"SETUP: Failed to create category: {exc}")
+            return
+    else:
+        jarvis_log.info(f"SETUP: Category '{cat_name}' already exists — skipping create")
+
+    # Step 3 — Stage channel permissions
+    admin_role = discord.utils.get(guild.roles, name="Admin")
+    mod_role   = discord.utils.get(guild.roles, name="Moderator")
+    everyone   = guild.default_role
+
+    stage_overwrites = {
+        everyone: discord.PermissionOverwrite(view_channel=True, connect=True, speak=False),
+    }
+    if admin_role:
+        stage_overwrites[admin_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True,
+            mute_members=True, move_members=True, manage_channels=True,
+        )
+    if mod_role:
+        stage_overwrites[mod_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True,
+            mute_members=True, move_members=True,
+        )
+
+    # Create Stage channel if it doesn't exist
+    existing_stage = discord.utils.get(guild.stage_channels, name=stage_name)
+    if not existing_stage:
+        try:
+            await guild.create_stage_channel(
+                stage_name,
+                category=category,
+                overwrites=stage_overwrites,
+            )
+            jarvis_log.info(f"SETUP: Created Stage channel '{stage_name}'")
+            print(f"[Stage] Created Stage channel '{stage_name}'")
+        except Exception as exc:
+            jarvis_log.error(f"SETUP: Failed to create Stage channel: {exc}")
+    else:
+        jarvis_log.info(f"SETUP: Stage channel '{stage_name}' already exists")
+
+    # Step 4 — Text channel: live-chat
+    existing_chat = discord.utils.get(guild.text_channels, name=chat_name)
+    if not existing_chat:
+        try:
+            await guild.create_text_channel(
+                chat_name,
+                category=category,
+                topic="Chat during live trading sessions. Keep it about the trades. 🍜",
+            )
+            jarvis_log.info(f"SETUP: Created text channel '{chat_name}'")
+            print(f"[Stage] Created text channel '{chat_name}'")
+        except Exception as exc:
+            jarvis_log.error(f"SETUP: Failed to create live-chat: {exc}")
+    else:
+        jarvis_log.info(f"SETUP: Text channel '{chat_name}' already exists")
+
+    print("[Stage] Live trading stage setup complete.")
+
+
 _prev_on_ready_f2 = client.on_ready
 
 @client.event
 async def on_ready():
     await _prev_on_ready_f2()
+
+    # Live trading stage setup
+    try:
+        guild = client.get_guild(GUILD_ID)
+        if guild:
+            await _setup_live_trading_stage(guild)
+    except Exception as exc:
+        jarvis_log.error(f"Stage setup error: {exc}")
 
     # Sync slash commands to guild (instant)
     try:
