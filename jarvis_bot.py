@@ -3034,5 +3034,259 @@ async def on_ready():
         print(f"[Features] {line}")
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── INDICATOR SYSTEM (Features A–C) ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_INDICATOR_SETUP_TEXT = """🍜 **LANGSTON VOLATILITY CAPTURE — SETUP GUIDE**
+
+⚙️ **RECOMMENDED SETTINGS**
+• "Require 1H structure" → OFF
+• All other settings → leave at default
+• Chart: works on 30s, 2m, 30m, and 1H
+
+🔔 **ALERT SETUP (TradingView Premium)**
+Create one alert PER chart timeframe you want:
+1. Open the chart (30s, 2m, 30m, or 1H)
+2. Alert button → Condition: Langston Volatility Capture → "Any alert() function call"
+3. Expiration: Open-ended
+4. Notifications tab → enable Webhook URL:
+   • 30s chart → https://jarvis-production-f7c4.up.railway.app/30s
+   • 2m chart → https://jarvis-production-f7c4.up.railway.app/2m
+   • 30m chart → https://jarvis-production-f7c4.up.railway.app/30m
+   • 1H chart → https://jarvis-production-f7c4.up.railway.app/1h
+5. Create ✅
+
+📍 **WHERE ALERTS GO**
+All signals post automatically in #markys-alerts with the chart timeframe labeled.
+
+🎯 **HOW THE TEAM TRADES THE SIGNALS**
+• Enter at the RED DOTTED LINE — regardless of what the label's entry price says
+• TP levels are guides, not rules — if you're in profit, taking it ANYTIME is a win
+• SL is the line in the sand. Respect it. Always.
+
+⚠️ Not financial advice. Manage your own risk. 🍜👑"""
+
+_INDICATOR_SYSTEM_PROMPT = """You are Jarvis, the official AI for The Soup Kitchen trading Discord.
+You are an expert on the Langston Volatility Capture indicator. Answer questions about it in the
+confident, sharp Soup Kitchen voice — concise, practical, no fluff.
+
+INDICATOR KNOWLEDGE BASE:
+- 4 market phases: QUIET (sit out), COLLECTING (hunting season — be ready), LEG (the big move is here), STAND DOWN (blocked by structure — don't trade)
+- Signals graded ⭐ to ⭐⭐⭐: more stars = signal fired at or through a key level = higher conviction trade
+- Labels show: E (entry price), SL (stop loss), T1/T2/T3 (three targets)
+- 🚀 LEG signals are runners with wider stops — different trade type than scalps, let them breathe
+- Yellow dots = hunting conditions active (COLLECTING phase)
+- Orange stepped lines = the collection range — price coiling before the move
+- Recommended settings: "Require 1H structure" OFF, run on 30s/2m/30m/1H, minimum ⭐⭐ on the 30-second chart
+- Team trading rules: enter at the RED DOTTED LINE regardless of what the label says for entry; take profit any time you're in profit; always respect the stop
+- Webhook URLs per timeframe: /30s /2m /30m /1h → all post to #markys-alerts
+- Access is invite-only via TradingView — members request access through the server
+
+SETUP GUIDE (full text):
+""" + _INDICATOR_SETUP_TEXT + """
+
+Always end answers with: "Not financial advice — manage your risk 🍜"
+Keep answers concise (3–6 sentences) unless a detailed walkthrough is needed."""
+
+_INDICATOR_KEYWORDS = {
+    "indicator", "langston", "volatility capture", "lvc",
+    "alert", "signal", "signals", "settings", "stars",
+    "phase", "phases", "quiet", "collecting", "leg", "stand down",
+    "webhook", "30s", "2m", "30m", "1h", "entry", "dotted line",
+    "yellow dot", "orange line", "wick",
+}
+
+
+async def _get_indicator_ai_response(question: str, username: str) -> str:
+    """Call Claude with the indicator system prompt."""
+    if not claude_client:
+        return "AI is offline right now — check back soon. 🍜"
+    try:
+        def _call():
+            return claude_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                system=_INDICATOR_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": f"{username} asks: {question}"}],
+            )
+        resp = await asyncio.to_thread(_call)
+        return resp.content[0].text.strip()
+    except Exception as exc:
+        jarvis_log.error(f"Indicator AI error: {exc}")
+        return "Something went wrong on my end — try again in a sec. 🍜"
+
+
+def _is_indicator_question(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in lower for kw in _INDICATOR_KEYWORDS)
+
+
+# ─── FEATURE A: Timeframe-labeled webhook routes ──────────────────────────────
+
+_TF_LABELS = {
+    "30s": "📊 Chart: 30-Second ⚡",
+    "2m":  "📊 Chart: 2-Minute 🎯",
+    "30m": "📊 Chart: 30-Minute 📈",
+    "1h":  "📊 Chart: 1-Hour 🏛",
+}
+
+
+def _make_tf_handler(tf_label: str):
+    """Return an aiohttp handler that injects a timeframe label into the alert."""
+    async def _handler(request: _aiohttp_web.Request) -> _aiohttp_web.Response:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            jarvis_log.error(f"Webhook [{tf_label}]: bad JSON — {exc}")
+            return _aiohttp_web.Response(status=400, text="Bad JSON")
+
+        ticker  = str(payload.get("ticker", "")).strip().upper()
+        action  = str(payload.get("action", "")).strip().upper()
+        price   = payload.get("price", "N/A")
+        message = payload.get("message", "")
+
+        jarvis_log.info(f"WEBHOOK [{tf_label}]: ticker={ticker} action={action} price={price}")
+
+        if not ticker:
+            jarvis_log.error(f"Webhook [{tf_label}]: missing ticker")
+            return _aiohttp_web.Response(status=400, text="Missing ticker")
+
+        now_str = datetime.now(_ET).strftime("%I:%M %p ET")
+        body = (
+            f"@everyone\n"
+            f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Action: {action} triggered at ${price}\n"
+            f"Message: {message}\n"
+            f"Time: {now_str}\n"
+        )
+        if tf_label:
+            body += f"{tf_label}\n"
+        body += (
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ Not financial advice. Manage your risk. 🍜"
+        )
+
+        async def _post():
+            guild = client.get_guild(GUILD_ID)
+            if not guild:
+                return
+            me = guild.me
+            if me and not me.guild_permissions.mention_everyone:
+                jarvis_log.warning("PERMISSION WARNING: Jarvis lacks 'Mention @everyone'")
+            ch = discord.utils.get(guild.text_channels, name="marky-alerts")
+            if not ch:
+                try:
+                    category = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
+                    ch = await guild.create_text_channel(
+                        "marky-alerts",
+                        category=category,
+                        topic="Marky's live trade signals — Langston Volatility Capture. 🍜",
+                    )
+                    jarvis_log.info("Created #marky-alerts channel")
+                except Exception as exc:
+                    jarvis_log.error(f"Could not create #marky-alerts: {exc}")
+                    ch = _ch(guild, _LIVE_CALLS_CHANNEL)
+            if not ch:
+                return
+            msg = await ch.send(body, allowed_mentions=discord.AllowedMentions(everyone=True))
+            try:
+                thread_name = f"${ticker} {tf_label.split(':')[1].strip().split(' ')[0] if tf_label else 'Alert'} Discussion"
+                await msg.create_thread(name=thread_name[:100])
+            except Exception as exc:
+                jarvis_log.warning(f"Webhook thread error: {exc}")
+
+        if _bot_loop:
+            asyncio.run_coroutine_threadsafe(_post(), _bot_loop)
+
+        return _aiohttp_web.Response(status=200, text="OK")
+
+    return _handler
+
+
+# Register the new timeframe routes by patching _start_webhook_server
+_orig_start_webhook_server = _start_webhook_server
+
+async def _start_webhook_server():
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        app = _aiohttp_web.Application()
+
+        # Legacy routes (unchanged)
+        app.router.add_post("/webhook", _handle_tv_webhook)
+        app.router.add_post("/",        _handle_tv_webhook)
+
+        # Timeframe-labeled routes
+        for tf, label in _TF_LABELS.items():
+            app.router.add_post(f"/{tf}", _make_tf_handler(label))
+            jarvis_log.info(f"Webhook route registered: POST /{tf} → {label}")
+
+        runner = _aiohttp_web.AppRunner(app)
+        await runner.setup()
+        site = _aiohttp_web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        routes = ["/", "/webhook", "/30s", "/2m", "/30m", "/1h"]
+        jarvis_log.info(f"Webhook server on 0.0.0.0:{port} — routes: {routes}")
+        print(f"[Webhook] Server online — port {port} — routes: {routes}")
+    except Exception as exc:
+        jarvis_log.error(f"Webhook server failed to start: {exc}")
+        print(f"[Webhook] Failed to start: {exc}")
+
+
+# ─── FEATURE B: /indicator slash command ─────────────────────────────────────
+
+@_slash_tree.command(name="indicator", description="Langston Volatility Capture — setup guide and alert URLs")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_indicator(interaction: discord.Interaction):
+    await interaction.response.send_message(_INDICATOR_SETUP_TEXT)
+    jarvis_log.info(f"INDICATOR guide sent to {interaction.user.display_name} in #{interaction.channel.name}")
+
+
+# ─── FEATURE C: Indicator keyword detection in @mention handler ───────────────
+# Chain the existing on_message to intercept indicator questions before
+# they reach the general AI, routing them to the specialist system prompt.
+
+_prev_on_message_indicator = client.on_message
+
+@client.event
+async def on_message(message):
+    try:
+        await _prev_on_message_indicator(message)
+    except Exception as exc:
+        jarvis_log.error(f"on_message indicator chain error: {exc}")
+
+    # Only intercept @Jarvis messages that look like indicator questions
+    if message.author.bot or message.guild is None:
+        return
+    if message.guild.id != GUILD_ID:
+        return
+    if client.user not in message.mentions:
+        return
+
+    content = re.sub(r"<@!?\d+>", "", message.content).strip()
+    if not content or not _is_indicator_question(content):
+        return
+
+    # Skip commands already handled upstream (help, testpost, static commands, market commands)
+    content_lower = content.lower()
+    skip_prefixes = ("help", "testpost", "price", "technicals", "ta", "options",
+                     "flow", "levels", "info", "movers", "sectors", "market",
+                     "crypto", "coin", "fear", "greed", "earnings", "news",
+                     "calendar", "econ", "prep", "rules", "access", "channels",
+                     "gm", "disclaimer")
+    if any(content_lower == p or content_lower.startswith(p + " ") for p in skip_prefixes):
+        return
+
+    jarvis_log.info(f"INDICATOR Q: {message.author.display_name}: {content[:80]}")
+    try:
+        async with message.channel.typing():
+            answer = await _get_indicator_ai_response(content, message.author.display_name)
+        await message.reply(answer, mention_author=False)
+    except Exception as exc:
+        jarvis_log.error(f"Indicator AI reply error: {exc}")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
