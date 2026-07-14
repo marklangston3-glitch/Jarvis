@@ -3056,10 +3056,22 @@ Just keep notifications ON for #markys-alerts. That's it.
 Running the indicator on your own charts? The signal arrows,
 labels, and dashboard work out of the box — no alerts needed.
 
-🎯 **HOW THE TEAM TRADES THE SIGNALS**
-• Enter at the RED DOTTED LINE — regardless of what the label's entry price says
-• TP levels are guides, not rules — if you're in profit, taking it ANYTIME is a win
-• SL is the line in the sand. Respect it. Always.
+🎯 **HOW WE TRADE THE SIGNALS — READ THIS TWICE**
+
+🔴 **ENTRY:** The RED DOTTED LINE is your entry.
+Not the label's entry price — the RED DOTTED LINE.
+Let price come back to you. Don't chase the burst.
+
+🛑 **STOP:** If you enter at the red line, the labeled SL is
+now YOUR ENTRY — so set your own stop 9 points beyond
+your fill. No stop = no trade. Ever.
+
+💰 **PROFIT:** TP levels are guides, not homework.
+In profit? Take it ANYTIME. Nobody ever went broke
+taking profit. Don't let a green trade turn red waiting
+for a target.
+
+This is how the kitchen eats. 🍜
 
 ⚠️ Not financial advice. Manage your own risk. 🍜👑"""
 
@@ -3075,7 +3087,10 @@ INDICATOR KNOWLEDGE BASE:
 - Yellow dots = hunting conditions active (COLLECTING phase)
 - Orange stepped lines = the collection range — price coiling before the move
 - Recommended settings: "Require 1H structure" OFF, run on 30s/2m/30m/1H, minimum ⭐⭐ on the 30-second chart
-- Team trading rules: enter at the RED DOTTED LINE regardless of what the label says for entry; take profit any time you're in profit; always respect the stop
+- ENTRY RULE (emphasize this hard): The RED DOTTED LINE is the entry — NOT the label's entry price. Let price come back. Never chase the burst.
+- STOP RULE (emphasize this hard): When you enter at the red dotted line, the labeled SL becomes your entry — so set your actual stop 9 points beyond your fill. No stop = no trade. Ever.
+- PROFIT RULE (emphasize this hard): TP levels are guides, not requirements. In profit anytime? Take it. Nobody went broke taking profit. Don't let a green trade turn red waiting for a target.
+- If anyone asks about entries, stops, the red line, or how to manage a trade, hammer these three rules clearly and directly.
 - Signals post automatically in #markys-alerts labeled by timeframe — members don't set up alerts. If someone specifically asks about webhooks or how alerts are wired, tell them that's admin infrastructure and to ping @Admin.
 - Access is invite-only via TradingView — members request access through the server
 
