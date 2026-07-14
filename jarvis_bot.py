@@ -2538,6 +2538,119 @@ async def on_member_join(member):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WELCOME CHANNEL — #👋・welcome setup + join posts
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WELCOME_FEED_CHANNEL = "👋・welcome"
+_START_HERE_CATEGORY  = "START HERE"
+
+
+async def _setup_welcome_channel(guild: discord.Guild):
+    """Create #👋・welcome in START HERE, locked so only Jarvis can post."""
+    existing = discord.utils.get(guild.text_channels, name=_WELCOME_FEED_CHANNEL)
+    if existing:
+        jarvis_log.info(f"SETUP: #{_WELCOME_FEED_CHANNEL} already exists")
+        return existing
+
+    category = discord.utils.get(guild.categories, name=_START_HERE_CATEGORY)
+    everyone  = guild.default_role
+    me        = guild.me
+
+    overwrites = {
+        everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        me:       discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+
+    # Grant Admin + Moderator send access too so mods can pin/manage
+    for role_name in ("Admin", "Moderator"):
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_messages=True
+            )
+
+    try:
+        ch = await guild.create_text_channel(
+            _WELCOME_FEED_CHANNEL,
+            category=category,
+            overwrites=overwrites,
+            topic="Every new member who walks through the door. 🍜",
+        )
+        # Position it just below #rules if possible
+        rules_ch = discord.utils.get(guild.text_channels, name="rules")
+        if rules_ch:
+            try:
+                await ch.edit(position=rules_ch.position + 1)
+            except Exception:
+                pass
+        jarvis_log.info(f"SETUP: Created #{_WELCOME_FEED_CHANNEL}")
+        print(f"[Welcome] Created #{_WELCOME_FEED_CHANNEL}")
+        return ch
+    except Exception as exc:
+        jarvis_log.error(f"SETUP: Failed to create welcome channel: {exc}")
+        return None
+
+
+async def _post_welcome_feed(member: discord.Member):
+    """Post the join card in #👋・welcome."""
+    guild = member.guild
+    ch = discord.utils.get(guild.text_channels, name=_WELCOME_FEED_CHANNEL)
+    if not ch:
+        jarvis_log.warning(f"Welcome feed: #{_WELCOME_FEED_CHANNEL} not found")
+        return
+    count = guild.member_count
+    try:
+        await ch.send(
+            f"👋 {member.mention} just walked into the kitchen!\n\n"
+            f"Member **#{count}** 🍜\n\n"
+            f"Say what's up in <#general-chat> and grab your seat —\n"
+            f"react ✅ in <#rules> to unlock the server."
+        )
+        jarvis_log.info(f"Welcome feed: posted for {member.display_name} (member #{count})")
+    except Exception as exc:
+        jarvis_log.error(f"Welcome feed post error: {exc}")
+
+
+async def _backfill_welcome_feed(guild: discord.Guild):
+    """Post a catch-up card listing members who joined in the last 7 days."""
+    ch = discord.utils.get(guild.text_channels, name=_WELCOME_FEED_CHANNEL)
+    if not ch:
+        return
+    cutoff = datetime.now(_ET) - timedelta(days=7)
+    recent = [
+        m for m in guild.members
+        if m.joined_at and m.joined_at.replace(tzinfo=None) > cutoff.replace(tzinfo=None)
+        and not m.bot
+    ]
+    if not recent:
+        jarvis_log.info("Welcome backfill: no members joined in last 7 days")
+        return
+    recent.sort(key=lambda m: m.joined_at)
+    lines = [f"📋 **KITCHEN BACKFILL — last 7 days** ({len(recent)} members)\n"]
+    for m in recent:
+        joined_str = m.joined_at.strftime("%b %d") if m.joined_at else "?"
+        lines.append(f"• {m.mention}  —  joined {joined_str}")
+    lines.append("\nThey're all in. Welcome to the kitchen. 🍜👑")
+    try:
+        await ch.send("\n".join(lines))
+        jarvis_log.info(f"Welcome backfill: posted {len(recent)} recent members")
+    except Exception as exc:
+        jarvis_log.error(f"Welcome backfill error: {exc}")
+
+
+# Chain on_member_join to post welcome feed card (DM sequence stays untouched above)
+_prev_on_member_join_welcome = client.on_member_join
+
+@client.event
+async def on_member_join(member):
+    try:
+        await _prev_on_member_join_welcome(member)
+    except Exception as exc:
+        jarvis_log.error(f"on_member_join welcome chain error: {exc}")
+    await _post_welcome_feed(member)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FEATURE 7 — Voice channel auto-announcement for co-founders
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2859,6 +2972,15 @@ async def on_ready():
             await _setup_live_trading_stage(guild)
     except Exception as exc:
         jarvis_log.error(f"Stage setup error: {exc}")
+
+    # Welcome channel setup + backfill
+    try:
+        guild = client.get_guild(GUILD_ID)
+        if guild:
+            await _setup_welcome_channel(guild)
+            await _backfill_welcome_feed(guild)
+    except Exception as exc:
+        jarvis_log.error(f"Welcome channel setup error: {exc}")
 
     # Sync slash commands to guild (instant)
     try:
