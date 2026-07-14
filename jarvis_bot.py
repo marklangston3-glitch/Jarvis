@@ -3046,20 +3046,15 @@ _INDICATOR_SETUP_TEXT = """🍜 **LANGSTON VOLATILITY CAPTURE — SETUP GUIDE**
 • All other settings → leave at default
 • Chart: works on 30s, 2m, 30m, and 1H
 
-🔔 **ALERT SETUP (TradingView Premium)**
-Create one alert PER chart timeframe you want:
-1. Open the chart (30s, 2m, 30m, or 1H)
-2. Alert button → Condition: Langston Volatility Capture → "Any alert() function call"
-3. Expiration: Open-ended
-4. Notifications tab → enable Webhook URL:
-   • 30s chart → https://jarvis-production-f7c4.up.railway.app/30s
-   • 2m chart → https://jarvis-production-f7c4.up.railway.app/2m
-   • 30m chart → https://jarvis-production-f7c4.up.railway.app/30m
-   • 1H chart → https://jarvis-production-f7c4.up.railway.app/1h
-5. Create ✅
+🔔 **ALERTS — ALREADY HANDLED FOR YOU**
+You don't need to set up anything. The team's signals post
+automatically in #markys-alerts, 24/7, labeled by chart timeframe
+(30s ⚡ / 2m 🎯 / 30m 📈 / 1H 🏛).
 
-📍 **WHERE ALERTS GO**
-All signals post automatically in #markys-alerts with the chart timeframe labeled.
+Just keep notifications ON for #markys-alerts. That's it.
+
+Running the indicator on your own charts? The signal arrows,
+labels, and dashboard work out of the box — no alerts needed.
 
 🎯 **HOW THE TEAM TRADES THE SIGNALS**
 • Enter at the RED DOTTED LINE — regardless of what the label's entry price says
@@ -3081,7 +3076,7 @@ INDICATOR KNOWLEDGE BASE:
 - Orange stepped lines = the collection range — price coiling before the move
 - Recommended settings: "Require 1H structure" OFF, run on 30s/2m/30m/1H, minimum ⭐⭐ on the 30-second chart
 - Team trading rules: enter at the RED DOTTED LINE regardless of what the label says for entry; take profit any time you're in profit; always respect the stop
-- Webhook URLs per timeframe: /30s /2m /30m /1h → all post to #markys-alerts
+- Signals post automatically in #markys-alerts labeled by timeframe — members don't set up alerts. If someone specifically asks about webhooks or how alerts are wired, tell them that's admin infrastructure and to ping @Admin.
 - Access is invite-only via TradingView — members request access through the server
 
 SETUP GUIDE (full text):
@@ -3121,6 +3116,35 @@ async def _get_indicator_ai_response(question: str, username: str) -> str:
 def _is_indicator_question(text: str) -> bool:
     lower = text.lower()
     return any(kw in lower for kw in _INDICATOR_KEYWORDS)
+
+
+# ─── /webhookinfo — admin-only, mod-chat only ────────────────────────────────
+
+@_slash_tree.command(name="webhookinfo", description="Show TradingView webhook URLs (Admin only, #mod-chat only)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_webhookinfo(interaction: discord.Interaction):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if interaction.channel.name != _MOD_CHANNEL:
+        await interaction.response.send_message("❌ Use this command in #mod-chat only.", ephemeral=True)
+        return
+    info = (
+        "🔐 **TRADINGVIEW WEBHOOK URLS — ADMIN ONLY**\n\n"
+        "```\n"
+        "30s chart  →  https://jarvis-production-f7c4.up.railway.app/30s\n"
+        "2m  chart  →  https://jarvis-production-f7c4.up.railway.app/2m\n"
+        "30m chart  →  https://jarvis-production-f7c4.up.railway.app/30m\n"
+        "1H  chart  →  https://jarvis-production-f7c4.up.railway.app/1h\n"
+        "Legacy     →  https://jarvis-production-f7c4.up.railway.app/\n"
+        "```\n"
+        "Each URL accepts a TradingView `Any alert() function call` alert.\n"
+        "All post to #marky-alerts with @everyone and the timeframe label.\n"
+        "Keep these out of public channels. 🍜"
+    )
+    await interaction.response.send_message(info, ephemeral=True)
+    jarvis_log.info(f"WEBHOOKINFO accessed by {interaction.user.display_name}")
 
 
 # ─── FEATURE A: Timeframe-labeled webhook routes ──────────────────────────────
