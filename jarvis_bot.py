@@ -2300,6 +2300,7 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
     now_str = datetime.now(_ET).strftime("%I:%M %p ET")
     body = (
         f"@everyone\n"
+        f"📊 **CHART: UNLABELED — update TradingView webhook URL**\n"
         f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Action: {action} triggered at ${price}\n"
@@ -3193,17 +3194,25 @@ def _make_tf_handler(tf_label: str):
             return _aiohttp_web.Response(status=400, text="Missing ticker")
 
         now_str = datetime.now(_ET).strftime("%I:%M %p ET")
-        body = (
-            f"@everyone\n"
+
+        # Map compact label → prominent header line
+        _tf_header_map = {
+            "📊 Chart: 30-Second ⚡": "📊 **30-SECOND ⚡ SIGNAL**",
+            "📊 Chart: 2-Minute 🎯":  "📊 **2-MINUTE 🎯 SIGNAL**",
+            "📊 Chart: 30-Minute 📈": "📊 **30-MINUTE 📈 SIGNAL**",
+            "📊 Chart: 1-Hour 🏛":    "📊 **1-HOUR 🏛 SIGNAL**",
+        }
+        header_line = _tf_header_map.get(tf_label, f"📊 **{tf_label}**") if tf_label else ""
+
+        body = f"@everyone\n"
+        if header_line:
+            body += f"{header_line}\n"
+        body += (
             f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Action: {action} triggered at ${price}\n"
             f"Message: {message}\n"
             f"Time: {now_str}\n"
-        )
-        if tf_label:
-            body += f"{tf_label}\n"
-        body += (
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"⚠️ Not financial advice. Manage your risk. 🍜"
         )
