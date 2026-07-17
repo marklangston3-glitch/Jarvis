@@ -1931,10 +1931,21 @@ from discord import app_commands as _app_commands
 
 # ── Co-founder IDs — fill these in manually ──────────────────────────────────
 _COFOUNDER_IDS: list = [
-    0,  # Co-founder 1 — replace with actual Discord user ID
-    0,  # Co-founder 2
-    0,  # Co-founder 3
+    "markyy8297",   # markyy8297 — add more usernames or numeric IDs as needed
 ]
+
+def _is_cofounder(member) -> bool:
+    """Match by numeric Discord user ID or by username/display_name string."""
+    for entry in _COFOUNDER_IDS:
+        if isinstance(entry, int):
+            if member.id == entry:
+                return True
+        elif isinstance(entry, str):
+            name = entry.lstrip("_")
+            if member.name == name or member.name == entry \
+               or member.display_name == name or member.display_name == entry:
+                return True
+    return False
 
 _LIVE_CALLS_CHANNEL  = "live-calls"
 _WATCHLIST_CHANNEL   = "watchlist"
@@ -2633,7 +2644,7 @@ async def on_member_join(member):
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if member.guild.id != GUILD_ID:
         return
-    if member.id not in _COFOUNDER_IDS or member.id == 0:
+    if not _is_cofounder(member):
         return
     ch = _ch(member.guild, "market-talk")
     if not ch:
@@ -3487,7 +3498,7 @@ async def on_voice_state_update(member, before, after):
 
     if member.guild.id != GUILD_ID:
         return
-    if member.id == 0 or member.id not in _COFOUNDER_IDS:
+    if not _is_cofounder(member):
         return
 
     # Co-founder joined a Stage channel (started a session)
