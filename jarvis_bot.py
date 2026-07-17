@@ -1931,7 +1931,9 @@ from discord import app_commands as _app_commands
 
 # ── Co-founder IDs — fill these in manually ──────────────────────────────────
 _COFOUNDER_IDS: list = [
-    "markyy8297",   # markyy8297 — add more usernames or numeric IDs as needed
+    "markyy8297",      # Marky
+    "the_algo_reaper", # Milad
+    "jtmfsu98",        # JT
 ]
 
 def _is_cofounder(member) -> bool:
