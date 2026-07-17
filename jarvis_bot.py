@@ -1918,5 +1918,1665 @@ async def on_ready():
     print(f"[Content] System online — {len(_SLOTS)} slots registered")
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── EXTENDED FEATURES 1–10 ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import json as _json
+from datetime import date as _date
+import aiohttp as _aiohttp
+from aiohttp import web as _aiohttp_web
+from discord import app_commands as _app_commands
+
+# ── Co-founder IDs — fill these in manually ──────────────────────────────────
+_COFOUNDER_IDS: list = [
+    0,  # Co-founder 1 — replace with actual Discord user ID
+    0,  # Co-founder 2
+    0,  # Co-founder 3
+]
+
+_LIVE_CALLS_CHANNEL  = "live-calls"
+_WATCHLIST_CHANNEL   = "watchlist"
+_WINS_CHANNEL        = "wins"
+_ANNOUNCEMENTS_CHANNEL = "announcements"
+_PNL_FILE   = "pnl_tracker.json"
+_JOINS_FILE = "member_joins.json"
+
+_MILESTONES_ALL  = {50, 100, 250, 500, 1000}
+_milestones_hit: set = set()
+
+# ── Slash command tree ────────────────────────────────────────────────────────
+_slash_tree = _app_commands.CommandTree(client)
+
+# ── Channel helper (name-based with fallback) ─────────────────────────────────
+
+def _ch(guild: discord.Guild, name: str, fallback: str = "market-talk"):
+    ch = discord.utils.get(guild.text_channels, name=name)
+    if not ch and fallback:
+        ch = discord.utils.get(guild.text_channels, name=fallback)
+        if ch:
+            jarvis_log.warning(f"#{name} not found — using #{fallback}")
+    return ch
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 1 — Live market context injected into every AI generation call
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _fetch_market_context() -> str:
+    try:
+        def _pull():
+            spy = yf.Ticker("SPY").fast_info
+            qqq = yf.Ticker("QQQ").fast_info
+            vix = yf.Ticker("^VIX").fast_info
+            return spy, qqq, vix
+
+        spy_fi, qqq_fi, vix_fi = await asyncio.to_thread(_pull)
+
+        spy_p = spy_fi.last_price
+        spy_c = ((spy_p - spy_fi.previous_close) / spy_fi.previous_close) * 100
+        qqq_p = qqq_fi.last_price
+        qqq_c = ((qqq_p - qqq_fi.previous_close) / qqq_fi.previous_close) * 100
+        vix_v = vix_fi.last_price
+
+        if vix_v < 15:
+            vix_char = "Low vol — patience pays"
+        elif vix_v < 20:
+            vix_char = "Moderate vol — trust your levels"
+        elif vix_v < 25:
+            vix_char = "Elevated vol — size down"
+        else:
+            vix_char = "High vol — defense wins today"
+
+        s_spy = "+" if spy_c >= 0 else ""
+        s_qqq = "+" if qqq_c >= 0 else ""
+        return (
+            f"Current market context: SPY ${spy_p:.2f} ({s_spy}{spy_c:.2f}%), "
+            f"QQQ ${qqq_p:.2f} ({s_qqq}{qqq_c:.2f}%), "
+            f"VIX {vix_v:.1f} ({vix_char}). "
+            "Factor this into your post naturally — don't just list the numbers, weave them into the narrative."
+        )
+    except Exception as exc:
+        jarvis_log.warning(f"Market context fetch failed: {exc}")
+        return ""
+
+
+# Monkey-patch _gen_content so every AI call gets live market context
+_orig_gen_content = _gen_content
+
+async def _gen_content(prompt: str) -> str:
+    ctx = await _fetch_market_context()
+    enhanced = prompt + (f"\n\n{ctx}" if ctx else "")
+    return await _orig_gen_content(enhanced)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 2 — /trade slash command
+# ─────────────────────────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="trade", description="Post a live trade alert to #live-calls")
+@_app_commands.describe(
+    ticker="Ticker symbol (e.g. MNST)",
+    direction="Long or Short",
+    entry="Entry price",
+    stop="Stop loss price",
+    target="Target price",
+    notes="Trade thesis",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_trade(
+    interaction: discord.Interaction,
+    ticker: str,
+    direction: str,
+    entry: float,
+    stop: float,
+    target: float,
+    notes: str = "",
+):
+    if interaction.channel.name != _MOD_CHANNEL:
+        await interaction.response.send_message("❌ Use /trade in #mod-chat only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    ticker = ticker.upper().strip()
+
+    try:
+        cur_price = await asyncio.to_thread(lambda: yf.Ticker(ticker).fast_info.last_price)
+    except Exception:
+        cur_price = None
+
+    risk   = abs(entry - stop)
+    reward = abs(target - entry)
+    rr     = reward / risk if risk > 0 else 0
+    pct_t  = ((target - entry) / entry) * 100
+    pct_s  = ((stop - entry) / entry) * 100
+
+    d_emoji = "📈" if direction.lower() == "long" else "📉"
+    s_t = "+" if pct_t >= 0 else ""
+    s_s = "+" if pct_s >= 0 else ""
+
+    body = (
+        f"🚨 **LIVE TRADE ALERT — THE SOUP KITCHEN**\n\n"
+        f"{d_emoji} **${ticker} — {direction.upper()}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Entry Zone:  ${entry:.2f}\n"
+        f"🎯 Target:      ${target:.2f}  ({s_t}{pct_t:.1f}%)\n"
+        f"🛑 Stop Loss:   ${stop:.2f}  ({s_s}{pct_s:.1f}%)\n"
+        f"📊 R:R Ratio:   {rr:.1f}:1\n"
+    )
+    if cur_price:
+        body += f"💵 Current Price: ${cur_price:.2f}\n"
+    body += "━━━━━━━━━━━━━━━━━━━━\n"
+    if notes:
+        body += f"💭 Thesis: {notes}\n\n"
+    body += "⚠️ This is not financial advice. Manage your own risk.\nPosted by Jarvis 🍜 | The Soup Kitchen"
+
+    live_ch = _ch(interaction.guild, _LIVE_CALLS_CHANNEL)
+    if not live_ch:
+        await interaction.followup.send("❌ #live-calls not found.", ephemeral=True)
+        return
+
+    alert_msg = await live_ch.send(body)
+    try:
+        await alert_msg.create_thread(name=f"${ticker} Trade Discussion")
+    except Exception as exc:
+        jarvis_log.warning(f"Trade thread creation failed: {exc}")
+
+    jarvis_log.info(f"TRADE ALERT: {ticker} {direction} → #{_LIVE_CALLS_CHANNEL}")
+    await interaction.followup.send(f"✅ Trade alert posted to {live_ch.mention}.", ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 3 — /watchlist slash command
+# ─────────────────────────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="watchlist", description="Post today's watchlist to #watchlist")
+@_app_commands.describe(tickers="Comma-separated tickers e.g. MNST,AAPL,SPY")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_watchlist(interaction: discord.Interaction, tickers: str):
+    if interaction.channel.name != _MOD_CHANNEL:
+        await interaction.response.send_message("❌ Use /watchlist in #mod-chat only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if not symbols:
+        await interaction.followup.send("❌ No tickers provided.", ephemeral=True)
+        return
+
+    def _fetch_wl():
+        rows = []
+        for sym in symbols:
+            try:
+                fi = yf.Ticker(sym).fast_info
+                price = fi.last_price
+                chg = ((price - fi.previous_close) / fi.previous_close) * 100
+                rows.append((sym, price, chg, fi.year_low, fi.year_high))
+            except Exception as e:
+                jarvis_log.warning(f"Watchlist {sym}: {e}")
+                rows.append((sym, None, None, None, None))
+        return rows
+
+    rows = await asyncio.to_thread(_fetch_wl)
+    today_str = datetime.now(_ET).strftime("%B %d, %Y")
+    lines = [f"👀 **TODAY'S WATCHLIST — THE SOUP KITCHEN**\n{today_str} | Market Open\n"]
+    for sym, price, chg, lo52, hi52 in rows:
+        if price is None:
+            lines.append(f"📊 **${sym}**  ❌ Data unavailable")
+            continue
+        arrow = "🟢" if chg >= 0 else "🔴"
+        sign = "+" if chg >= 0 else ""
+        w52 = f"${lo52:.2f} — ${hi52:.2f}" if hi52 and lo52 else "N/A"
+        lines.append(f"📊 **${sym}**   ${price:.2f}   {arrow} {sign}{chg:.2f}%  |  52W: {w52}")
+    lines.append("\nDrop your levels and thesis below 👇\nWhat's your conviction play today? 🍜")
+
+    wl_ch = _ch(interaction.guild, _WATCHLIST_CHANNEL)
+    if not wl_ch:
+        await interaction.followup.send("❌ #watchlist not found.", ephemeral=True)
+        return
+
+    await wl_ch.send("\n".join(lines))
+    jarvis_log.info(f"WATCHLIST posted: {', '.join(symbols)}")
+    await interaction.followup.send(f"✅ Watchlist posted to {wl_ch.mention}.", ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 4 — /pnl slash command + Friday leaderboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pnl_load() -> dict:
+    try:
+        with open(_PNL_FILE) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return {"entries": [], "week_start": str(_date.today())}
+
+def _pnl_save(data: dict):
+    try:
+        with open(_PNL_FILE, "w") as f:
+            _json.dump(data, f, indent=2)
+    except Exception as exc:
+        jarvis_log.error(f"PNL save error: {exc}")
+
+
+@_slash_tree.command(name="pnl", description="Log your PnL for the day")
+@_app_commands.describe(
+    amount="Amount won or lost (e.g. +450 or -200)",
+    trade="What you traded (e.g. MNST calls)",
+    notes="Optional notes",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_pnl(interaction: discord.Interaction, amount: str, trade: str, notes: str = ""):
+    await interaction.response.defer()
+    try:
+        amount_val = float(amount.replace("$", "").replace(",", ""))
+    except ValueError:
+        await interaction.followup.send("❌ Invalid amount. Use +450 or -200.", ephemeral=True)
+        return
+
+    entry = {
+        "username": interaction.user.display_name,
+        "user_id": str(interaction.user.id),
+        "amount": amount_val,
+        "trade": trade,
+        "notes": notes,
+        "timestamp": datetime.now(_ET).isoformat(),
+        "day": datetime.now(_ET).strftime("%A"),
+    }
+    data = _pnl_load()
+    data["entries"].append(entry)
+    _pnl_save(data)
+
+    sign = "✅" if amount_val >= 0 else "❌"
+    dollar = f"+${amount_val:.0f}" if amount_val >= 0 else f"-${abs(amount_val):.0f}"
+    body = f"💰 **PNL LOGGED — {interaction.user.mention}**\n{trade}: {dollar} {sign}\n"
+    if notes:
+        body += f'"{notes}"\n'
+    body += "🍜 Keep cooking."
+
+    await interaction.followup.send(body)
+    jarvis_log.info(f"PNL: {interaction.user.display_name} {dollar} ({trade})")
+
+
+async def _post_pnl_leaderboard():
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    wins_ch = _ch(guild, _WINS_CHANNEL)
+    if not wins_ch:
+        return
+
+    data = _pnl_load()
+    entries = data.get("entries", [])
+    if not entries:
+        jarvis_log.info("PNL leaderboard: no entries this week — skipping")
+        return
+
+    totals: dict = {}
+    for e in entries:
+        uid = e["user_id"]
+        if uid not in totals:
+            totals[uid] = {"username": e["username"], "total": 0.0}
+        totals[uid]["total"] += e["amount"]
+
+    ranked = sorted(totals.values(), key=lambda x: x["total"], reverse=True)
+    green = sum(1 for v in totals.values() if v["total"] >= 0)
+    red = len(totals) - green
+
+    week_start = data.get("week_start", str(_date.today()))
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [
+        "🏆 **WEEKLY PNL LEADERBOARD**",
+        f"Week of {week_start} — {datetime.now(_ET).strftime('%B %d, %Y')}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for i, v in enumerate(ranked[:10]):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        s = "+" if v["total"] >= 0 else ""
+        lines.append(f"{medal} @{v['username']}    {s}${v['total']:.0f}")
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📊 Total members reporting: {len(totals)}",
+        f"💚 Green on the week: {green}",
+        f"🔴 Red on the week: {red}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Post your trades in the server.",
+        "The kitchen runs on proof. 🍜👑",
+    ]
+    await wins_ch.send("\n".join(lines))
+    jarvis_log.info(f"PNL leaderboard posted — {len(totals)} traders")
+    _pnl_save({"entries": [], "week_start": str(_date.today())})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 5 — TradingView webhook listener on port 8080
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Response:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        jarvis_log.error(f"Webhook: bad JSON — {exc}")
+        return _aiohttp_web.Response(status=400, text="Bad JSON")
+
+    ticker  = str(payload.get("ticker", "")).strip().upper()
+    action  = str(payload.get("action", "")).strip().upper()
+    price   = payload.get("price", "N/A")
+    message = payload.get("message", "")
+
+    jarvis_log.info(f"WEBHOOK IN: ticker={ticker} action={action} price={price}")
+
+    if not ticker:
+        jarvis_log.error("Webhook: missing ticker — not posting")
+        return _aiohttp_web.Response(status=400, text="Missing ticker")
+
+    now_str = datetime.now(_ET).strftime("%I:%M %p ET")
+    body = (
+        f"@everyone\n"
+        f"📊 **CHART: UNLABELED — update TradingView webhook URL**\n"
+        f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Action: {action} triggered at ${price}\n"
+        f"Message: {message}\n"
+        f"Time: {now_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Not financial advice. Manage your risk. 🍜"
+    )
+
+    async def _post():
+        guild = client.get_guild(GUILD_ID)
+        if not guild:
+            return
+
+        # Check if Jarvis has Mention Everyone permission — log warning if not
+        me = guild.me
+        if me and not me.guild_permissions.mention_everyone:
+            jarvis_log.warning(
+                "PERMISSION WARNING: Jarvis does not have 'Mention @everyone' permission. "
+                "@everyone ping will not fire until this is granted in Server Settings → Roles → Jarvis."
+            )
+
+        # Find or create #marky-alerts in the paid alerts category
+        ch = discord.utils.get(guild.text_channels, name="marky-alerts")
+        if not ch:
+            try:
+                category = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
+                ch = await guild.create_text_channel(
+                    "marky-alerts",
+                    category=category,
+                    topic="Marky's live trade signals — Langston Volatility Capture. 🍜",
+                )
+                jarvis_log.info("Created #marky-alerts channel")
+            except Exception as exc:
+                jarvis_log.error(f"Could not create #marky-alerts: {exc}")
+                ch = _ch(guild, _LIVE_CALLS_CHANNEL)  # fallback
+        if not ch:
+            return
+        msg = await ch.send(
+            body,
+            allowed_mentions=discord.AllowedMentions(everyone=True),
+        )
+        try:
+            await msg.create_thread(name=f"${ticker} Alert Discussion")
+        except Exception as exc:
+            jarvis_log.warning(f"Webhook thread error: {exc}")
+
+    if _bot_loop:
+        asyncio.run_coroutine_threadsafe(_post(), _bot_loop)
+
+    return _aiohttp_web.Response(status=200, text="OK")
+
+
+async def _start_webhook_server():
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        app = _aiohttp_web.Application()
+        app.router.add_post("/webhook", _handle_tv_webhook)
+        # Also accept POST on / so Railway health checks and direct-root POSTs work
+        app.router.add_post("/", _handle_tv_webhook)
+        runner = _aiohttp_web.AppRunner(app)
+        await runner.setup()
+        site = _aiohttp_web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        jarvis_log.info(f"TradingView webhook server listening on 0.0.0.0:{port}")
+        print(f"[Webhook] Server online — 0.0.0.0:{port}/webhook  (PORT={port})")
+    except Exception as exc:
+        jarvis_log.error(f"Webhook server failed to start: {exc}")
+        print(f"[Webhook] Failed to start: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 6 — 3-message welcome DM sequence
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DM1 = (
+    "👑 Welcome to The Soup Kitchen, {name}.\n\n"
+    "You just joined one of the most disciplined trading communities out there.\n\n"
+    "Here's what to do first:\n"
+    "1. Read #rules\n"
+    "2. React ✅ to get your Free Member role\n"
+    "3. Check #daily-levels every morning before the bell\n\n"
+    "We feed traders daily. 🍜"
+)
+_DM2 = (
+    "📋 Hey {name} — Jarvis checking in.\n\n"
+    "Here's how to get the most out of the kitchen:\n\n"
+    "• #daily-levels — key levels every morning before open\n"
+    "• #watchlist — what the team is watching each day\n"
+    "• #wins — drop your W's here\n"
+    "• #trade-journal — log every trade, win or lose\n"
+    "• #market-talk — community discussion all day\n\n"
+    "The best traders in here show up every single day. 🍜"
+)
+_DM3 = (
+    "🔒 {name} — ready for the full menu?\n\n"
+    "Paid members get:\n"
+    "• 🚨 Live trade alerts in real time\n"
+    "• 🌊 Options flow and unusual activity\n"
+    "• 📊 Full trade recaps after every call\n"
+    "• 📖 The complete Soup Kitchen playbook\n"
+    "• 🎥 Recorded sessions and education\n"
+    "• ❓ Direct Q&A access to the team\n\n"
+    "When you're ready: check #how-to-get-access\n\n"
+    "Good trades feed everyone. 🍜👑"
+)
+
+
+def _joins_load() -> dict:
+    try:
+        with open(_JOINS_FILE) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return {}
+
+def _joins_save(data: dict):
+    try:
+        with open(_JOINS_FILE, "w") as f:
+            _json.dump(data, f, indent=2)
+    except Exception as exc:
+        jarvis_log.error(f"Joins save error: {exc}")
+
+
+async def _check_welcome_dms():
+    data = _joins_load()
+    now = datetime.now(_ET)
+    dirty = False
+    for uid, info in list(data.items()):
+        try:
+            joined = datetime.fromisoformat(info["joined_at"])
+            hours  = (now - joined).total_seconds() / 3600
+            guild  = client.get_guild(GUILD_ID)
+            member = guild.get_member(int(uid)) if guild else None
+            if not member:
+                del data[uid]
+                dirty = True
+                continue
+            name = member.display_name
+
+            if not info.get("dm2_sent") and hours >= 24:
+                try:
+                    await member.send(_DM2.format(name=name))
+                except discord.Forbidden:
+                    pass
+                data[uid]["dm2_sent"] = True
+                dirty = True
+                jarvis_log.info(f"Welcome DM2 → {name}")
+
+            if not info.get("dm3_sent") and hours >= 48:
+                try:
+                    await member.send(_DM3.format(name=name))
+                except discord.Forbidden:
+                    pass
+                data[uid]["dm3_sent"] = True
+                dirty = True
+                jarvis_log.info(f"Welcome DM3 → {name}")
+
+            if info.get("dm2_sent") and info.get("dm3_sent"):
+                del data[uid]
+                dirty = True
+        except Exception as exc:
+            jarvis_log.error(f"Welcome DM check uid={uid}: {exc}")
+    if dirty:
+        _joins_save(data)
+
+
+# Chain on_member_join — DM1 + join tracking + milestone check
+_prev_on_member_join_f6 = client.on_member_join
+
+@client.event
+async def on_member_join(member):
+    try:
+        await _prev_on_member_join_f6(member)
+    except Exception as exc:
+        jarvis_log.error(f"on_member_join chain error: {exc}")
+
+    # DM 1 — immediate
+    try:
+        await member.send(_DM1.format(name=member.display_name))
+        jarvis_log.info(f"Welcome DM1 → {member.display_name}")
+    except discord.Forbidden:
+        jarvis_log.warning(f"DM1 blocked for {member.display_name}")
+    except Exception as exc:
+        jarvis_log.error(f"DM1 error: {exc}")
+
+    # Log join for DM2/DM3 scheduler
+    data = _joins_load()
+    data[str(member.id)] = {
+        "username": member.display_name,
+        "joined_at": datetime.now(_ET).isoformat(),
+        "dm2_sent": False,
+        "dm3_sent": False,
+    }
+    _joins_save(data)
+
+    # FEATURE 9 — Milestone check
+    try:
+        count = member.guild.member_count
+        if count in _MILESTONES_ALL and count not in _milestones_hit:
+            _milestones_hit.add(count)
+            ann_ch = _ch(member.guild, _ANNOUNCEMENTS_CHANNEL)
+            if ann_ch:
+                _milestone_msgs = {
+                    50: (
+                        "🎉 **50 MEMBERS IN THE KITCHEN**\n"
+                        "The soup is getting thick.\n"
+                        "Thank you to every single one of you for being here early.\n"
+                        "The best is coming. 🍜👑"
+                    ),
+                    100: (
+                        "👑 **100 MEMBERS — THE KITCHEN IS OFFICIAL**\n"
+                        "This is where it started.\n"
+                        "The founding members who were here at 100 — you'll remember this.\n"
+                        "Paywall goes up soon. Get your founding rate while it's open. 🍜"
+                    ),
+                    250: (
+                        "🔥 **250 MEMBERS DEEP**\n"
+                        "The Soup Kitchen is no longer a secret.\n"
+                        "Tell a trader. Send the link. Feed the people. 🍜👑"
+                    ),
+                    500: (
+                        "⚡ **500 MEMBERS**\n"
+                        "Half a thousand traders eating at the kitchen.\n"
+                        "This is only the beginning. 🍜👑"
+                    ),
+                    1000: (
+                        "👑 **ONE THOUSAND MEMBERS**\n"
+                        "What started as an idea is now a movement.\n"
+                        "Good trades feed everyone. 🍜👑"
+                    ),
+                }
+                await ann_ch.send(_milestone_msgs[count])
+                jarvis_log.info(f"Milestone {count} announced")
+    except Exception as exc:
+        jarvis_log.error(f"Milestone error: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WELCOME CHANNEL — #👋・welcome setup + join posts
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WELCOME_FEED_CHANNEL = "👋・welcome"
+_START_HERE_CATEGORY  = "START HERE"
+
+
+async def _setup_welcome_channel(guild: discord.Guild):
+    """Create #👋・welcome in START HERE, locked so only Jarvis can post."""
+    existing = discord.utils.get(guild.text_channels, name=_WELCOME_FEED_CHANNEL)
+    if existing:
+        jarvis_log.info(f"SETUP: #{_WELCOME_FEED_CHANNEL} already exists")
+        return existing
+
+    category = discord.utils.get(guild.categories, name=_START_HERE_CATEGORY)
+    everyone  = guild.default_role
+    me        = guild.me
+
+    overwrites = {
+        everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        me:       discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+
+    # Grant Admin + Moderator send access too so mods can pin/manage
+    for role_name in ("Admin", "Moderator"):
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_messages=True
+            )
+
+    try:
+        ch = await guild.create_text_channel(
+            _WELCOME_FEED_CHANNEL,
+            category=category,
+            overwrites=overwrites,
+            topic="Every new member who walks through the door. 🍜",
+        )
+        # Position it just below #rules if possible
+        rules_ch = discord.utils.get(guild.text_channels, name="rules")
+        if rules_ch:
+            try:
+                await ch.edit(position=rules_ch.position + 1)
+            except Exception:
+                pass
+        jarvis_log.info(f"SETUP: Created #{_WELCOME_FEED_CHANNEL}")
+        print(f"[Welcome] Created #{_WELCOME_FEED_CHANNEL}")
+        return ch
+    except Exception as exc:
+        jarvis_log.error(f"SETUP: Failed to create welcome channel: {exc}")
+        return None
+
+
+async def _post_welcome_feed(member: discord.Member):
+    """Post the join card in #👋・welcome."""
+    guild = member.guild
+    ch = discord.utils.get(guild.text_channels, name=_WELCOME_FEED_CHANNEL)
+    if not ch:
+        jarvis_log.warning(f"Welcome feed: #{_WELCOME_FEED_CHANNEL} not found")
+        return
+    count = guild.member_count
+    try:
+        await ch.send(
+            f"👋 {member.mention} just walked into the kitchen!\n\n"
+            f"Member **#{count}** 🍜\n\n"
+            f"Say what's up in <#general-chat> and grab your seat —\n"
+            f"react ✅ in <#rules> to unlock the server."
+        )
+        jarvis_log.info(f"Welcome feed: posted for {member.display_name} (member #{count})")
+    except Exception as exc:
+        jarvis_log.error(f"Welcome feed post error: {exc}")
+
+
+async def _backfill_welcome_feed(guild: discord.Guild):
+    """Post a catch-up card listing members who joined in the last 7 days."""
+    ch = discord.utils.get(guild.text_channels, name=_WELCOME_FEED_CHANNEL)
+    if not ch:
+        return
+    cutoff = datetime.now(_ET) - timedelta(days=7)
+    recent = [
+        m for m in guild.members
+        if m.joined_at and m.joined_at.replace(tzinfo=None) > cutoff.replace(tzinfo=None)
+        and not m.bot
+    ]
+    if not recent:
+        jarvis_log.info("Welcome backfill: no members joined in last 7 days")
+        return
+    recent.sort(key=lambda m: m.joined_at)
+    lines = [f"📋 **KITCHEN BACKFILL — last 7 days** ({len(recent)} members)\n"]
+    for m in recent:
+        joined_str = m.joined_at.strftime("%b %d") if m.joined_at else "?"
+        lines.append(f"• {m.mention}  —  joined {joined_str}")
+    lines.append("\nThey're all in. Welcome to the kitchen. 🍜👑")
+    try:
+        await ch.send("\n".join(lines))
+        jarvis_log.info(f"Welcome backfill: posted {len(recent)} recent members")
+    except Exception as exc:
+        jarvis_log.error(f"Welcome backfill error: {exc}")
+
+
+# Chain on_member_join to post welcome feed card (DM sequence stays untouched above)
+_prev_on_member_join_welcome = client.on_member_join
+
+@client.event
+async def on_member_join(member):
+    try:
+        await _prev_on_member_join_welcome(member)
+    except Exception as exc:
+        jarvis_log.error(f"on_member_join welcome chain error: {exc}")
+    await _post_welcome_feed(member)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 7 — Voice channel auto-announcement for co-founders
+# ─────────────────────────────────────────────────────────────────────────────
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.guild.id != GUILD_ID:
+        return
+    if member.id not in _COFOUNDER_IDS or member.id == 0:
+        return
+    ch = _ch(member.guild, "market-talk")
+    if not ch:
+        return
+    try:
+        joined   = before.channel is None and after.channel is not None
+        left     = before.channel is not None and after.channel is None
+        is_stage = after.channel is not None and isinstance(after.channel, discord.StageChannel)
+
+        if joined:
+            if is_stage:
+                await ch.send(
+                    "🎙️ **THE KITCHEN IS LIVE**\n"
+                    "Live trading session starting now. Pull up. 🍜👑"
+                )
+                jarvis_log.info(f"STAGE JOIN: {member.display_name} → #{after.channel.name}")
+            else:
+                await ch.send(
+                    f"🎙️ **LIVE SESSION STARTING**\n"
+                    f"{member.display_name} just joined the trading floor.\n\n"
+                    f"Get in the kitchen. 🍜👑"
+                )
+                jarvis_log.info(f"VOICE JOIN: {member.display_name} → #{after.channel.name}")
+        elif left:
+            await ch.send(
+                "📴 **Session ended.**\n"
+                "Recap dropping in #trade-recaps shortly. 🍜"
+            )
+            jarvis_log.info(f"VOICE LEAVE: {member.display_name}")
+    except Exception as exc:
+        jarvis_log.error(f"Voice announcement error: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 8 — Auto-moderator (revised rules)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Exempt (no automod at all):  Admin, Moderator, Paid Member
+# Free Member:                 loosened rules (see below)
+# Unverified:                  strictest treatment
+#
+# DELETE triggers:
+#   • Link + banned phrase together  (classic spam combo, any account)
+#   • Link posted by Unverified account
+#   • Banned phrase posted by Unverified account
+#   • 10+ identical chars in a row (any non-exempt account)
+#
+# MOD-LOG (no delete, human decides):
+#   • Link alone from a Free Member
+#   • Banned phrase alone from a Free Member
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AUTOMOD_FULL_EXEMPT = {"Admin", "Moderator", "Paid Member"}
+_AUTOMOD_UNVERIFIED  = "Unverified"
+_BOT_LOGS_CHANNEL    = "bot-logs"
+
+_BANNED_PHRASES = [
+    "dm me", "check my profile", "free signals", "guaranteed profit", "100% win rate"
+]
+_RE_LINK = re.compile(r"https?://", re.IGNORECASE)
+_RE_SPAM = re.compile(r"(.)\1{9,}")  # 10+ identical chars in a row
+
+
+def _automod_tier(member: discord.Member) -> str:
+    """Return 'exempt', 'unverified', or 'free'."""
+    role_names = {r.name for r in member.roles}
+    if role_names & _AUTOMOD_FULL_EXEMPT:
+        return "exempt"
+    if _AUTOMOD_UNVERIFIED in role_names:
+        return "unverified"
+    return "free"
+
+
+async def _automod_delete(message: discord.Message, reason: str):
+    try:
+        await message.delete()
+        jarvis_log.info(
+            f"AUTOMOD DELETE [{reason}] {message.author} "
+            f"in #{message.channel.name}: {message.content[:80]}"
+        )
+        await message.author.send(
+            "🚫 Your message was removed in The Soup Kitchen.\n"
+            "No unsolicited links or promotional content. Keep it clean. 🍜"
+        )
+    except discord.Forbidden:
+        jarvis_log.warning(f"AUTOMOD: could not delete/DM {message.author}")
+    except Exception as exc:
+        jarvis_log.error(f"AUTOMOD delete error: {exc}")
+
+
+async def _automod_flag(message: discord.Message, reason: str):
+    """Post a note in #bot-logs for a human mod to review — do NOT delete."""
+    guild = message.guild
+    log_ch = discord.utils.get(guild.text_channels, name=_BOT_LOGS_CHANNEL)
+    if not log_ch:
+        log_ch = _ch(guild, "mod-chat")  # fallback if bot-logs doesn't exist
+    if not log_ch:
+        jarvis_log.warning(f"AUTOMOD FLAG [{reason}]: no log channel found")
+        return
+    try:
+        mod_role = discord.utils.get(guild.roles, name="Moderator")
+        mention  = mod_role.mention if mod_role else "@Moderator"
+        await log_ch.send(
+            f"🟡 **AUTOMOD FLAG** — {mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**User:** {message.author.mention} ({message.author})\n"
+            f"**Channel:** {message.channel.mention}\n"
+            f"**Message:** {message.jump_url}\n"
+            f"```{message.content[:300]}```\n"
+            f"React or delete as needed — Jarvis did not remove this."
+        )
+        jarvis_log.info(
+            f"AUTOMOD FLAG [{reason}] {message.author} "
+            f"in #{message.channel.name}: {message.content[:80]}"
+        )
+    except Exception as exc:
+        jarvis_log.error(f"AUTOMOD flag error: {exc}")
+
+
+_prev_on_message_f8 = client.on_message
+
+@client.event
+async def on_message(message):
+    try:
+        await _prev_on_message_f8(message)
+    except Exception as exc:
+        jarvis_log.error(f"on_message chain error: {exc}")
+
+    if message.author.bot or message.guild is None:
+        return
+    if message.guild.id != GUILD_ID:
+        return
+
+    tier = _automod_tier(message.author)
+    if tier == "exempt":
+        return
+
+    content = message.content
+    lower   = content.lower()
+
+    has_link   = bool(_RE_LINK.search(content))
+    has_phrase = any(p in lower for p in _BANNED_PHRASES)
+    has_spam   = bool(_RE_SPAM.search(content))
+
+    if has_spam:
+        # Hard delete for everyone non-exempt
+        await _automod_delete(message, "spam repeat (10+ chars)")
+        return
+
+    if tier == "unverified":
+        # Stricter — delete on link OR banned phrase alone
+        if has_link:
+            await _automod_delete(message, "link (Unverified account)")
+        elif has_phrase:
+            await _automod_delete(message, "banned phrase (Unverified account)")
+        return
+
+    # Free Member — only delete when link + phrase appear together
+    if has_link and has_phrase:
+        await _automod_delete(message, "link + banned phrase combo")
+    elif has_link:
+        await _automod_flag(message, "link posted (Free Member)")
+    elif has_phrase:
+        await _automod_flag(message, "banned phrase (Free Member)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE 10 — /clip slash command
+# ─────────────────────────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="clip", description="Clip a message by ID and repost it in #wins")
+@_app_commands.describe(message_id="Right-click the message → Copy ID, paste here")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_clip(interaction: discord.Interaction, message_id: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        mid = int(message_id)
+        ref_msg = await interaction.channel.fetch_message(mid)
+    except Exception:
+        await interaction.followup.send("❌ Message not found in this channel.", ephemeral=True)
+        return
+
+    wins_ch = _ch(interaction.guild, _WINS_CHANNEL)
+    if not wins_ch:
+        await interaction.followup.send("❌ #wins not found.", ephemeral=True)
+        return
+
+    body = (
+        f"📸 **KITCHEN CLIP**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{ref_msg.content}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"@{ref_msg.author.display_name} | The Soup Kitchen 🍜👑\n"
+        f"discord.gg/soupkitchen"
+    )
+    await wins_ch.send(body)
+    jarvis_log.info(f"CLIP → {wins_ch.name} from {ref_msg.author.display_name}")
+    await interaction.followup.send(f"✅ Clipped to {wins_ch.mention}.", ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wire slash commands into the client interaction dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+@client.event
+async def on_interaction(interaction: discord.Interaction):
+    await _slash_tree.process_application_commands(interaction)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final on_ready chain — sync slash commands, start webhook, start schedulers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _setup_live_trading_stage(guild: discord.Guild):
+    """Create 💰 LIVE TRADING 💰 category with Stage + live-chat if not already present."""
+
+    # Step 1 — Verify Community is enabled (required for Stage channels)
+    if "COMMUNITY" not in guild.features:
+        jarvis_log.warning(
+            "SETUP: Guild does not have COMMUNITY feature enabled. "
+            "Stage channels require Community mode. "
+            "Enable it in Server Settings → Enable Community, then restart the bot."
+        )
+        print("[Stage] ⚠️  Community not enabled — Stage channel skipped.")
+        return
+
+    # Step 2 — Find or create the category, positioned above PAID ALERTS
+    cat_name   = "💰 LIVE TRADING 💰"
+    stage_name = "🎙️・soup-kitchen-live"
+    chat_name  = "💬・live-chat"
+
+    category = discord.utils.get(guild.categories, name=cat_name)
+    if not category:
+        # Position just above 🔒 PAID ALERTS if it exists
+        paid_cat = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
+        position = (paid_cat.position if paid_cat else 0)
+        try:
+            category = await guild.create_category(cat_name, position=position)
+            jarvis_log.info(f"SETUP: Created category '{cat_name}' at position {position}")
+            print(f"[Stage] Created category '{cat_name}'")
+        except Exception as exc:
+            jarvis_log.error(f"SETUP: Failed to create category: {exc}")
+            return
+    else:
+        jarvis_log.info(f"SETUP: Category '{cat_name}' already exists — skipping create")
+
+    # Step 3 — Stage channel permissions
+    admin_role = discord.utils.get(guild.roles, name="Admin")
+    mod_role   = discord.utils.get(guild.roles, name="Moderator")
+    everyone   = guild.default_role
+
+    stage_overwrites = {
+        everyone: discord.PermissionOverwrite(view_channel=True, connect=True, speak=False),
+    }
+    if admin_role:
+        stage_overwrites[admin_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True,
+            mute_members=True, move_members=True, manage_channels=True,
+        )
+    if mod_role:
+        stage_overwrites[mod_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True,
+            mute_members=True, move_members=True,
+        )
+
+    # Create Stage channel if it doesn't exist
+    existing_stage = discord.utils.get(guild.stage_channels, name=stage_name)
+    if not existing_stage:
+        try:
+            await guild.create_stage_channel(
+                stage_name,
+                category=category,
+                overwrites=stage_overwrites,
+            )
+            jarvis_log.info(f"SETUP: Created Stage channel '{stage_name}'")
+            print(f"[Stage] Created Stage channel '{stage_name}'")
+        except Exception as exc:
+            jarvis_log.error(f"SETUP: Failed to create Stage channel: {exc}")
+    else:
+        jarvis_log.info(f"SETUP: Stage channel '{stage_name}' already exists")
+
+    # Step 4 — Text channel: live-chat
+    existing_chat = discord.utils.get(guild.text_channels, name=chat_name)
+    if not existing_chat:
+        try:
+            await guild.create_text_channel(
+                chat_name,
+                category=category,
+                topic="Chat during live trading sessions. Keep it about the trades. 🍜",
+            )
+            jarvis_log.info(f"SETUP: Created text channel '{chat_name}'")
+            print(f"[Stage] Created text channel '{chat_name}'")
+        except Exception as exc:
+            jarvis_log.error(f"SETUP: Failed to create live-chat: {exc}")
+    else:
+        jarvis_log.info(f"SETUP: Text channel '{chat_name}' already exists")
+
+    print("[Stage] Live trading stage setup complete.")
+
+
+_prev_on_ready_f2 = client.on_ready
+
+@client.event
+async def on_ready():
+    await _prev_on_ready_f2()
+
+    # Live trading stage setup
+    try:
+        guild = client.get_guild(GUILD_ID)
+        if guild:
+            await _setup_live_trading_stage(guild)
+    except Exception as exc:
+        jarvis_log.error(f"Stage setup error: {exc}")
+
+    # Welcome channel setup + backfill
+    try:
+        guild = client.get_guild(GUILD_ID)
+        if guild:
+            await _setup_welcome_channel(guild)
+            await _backfill_welcome_feed(guild)
+    except Exception as exc:
+        jarvis_log.error(f"Welcome channel setup error: {exc}")
+
+    # Sync slash commands to guild (instant)
+    try:
+        guild_obj = discord.Object(id=GUILD_ID)
+        synced = await _slash_tree.sync(guild=guild_obj)
+        names = [c.name for c in synced]
+        jarvis_log.info(f"Slash commands synced: {names}")
+        print(f"[Slash] Commands synced: {names}")
+    except Exception as exc:
+        jarvis_log.error(f"Slash sync failed: {exc}")
+        print(f"[Slash] Sync failed: {exc}")
+
+    # Start TradingView webhook server
+    asyncio.create_task(_start_webhook_server())
+
+    # Hourly welcome DM checker
+    def _dm_job():
+        if _bot_loop:
+            asyncio.run_coroutine_threadsafe(_check_welcome_dms(), _bot_loop)
+
+    _schedule.every(1).hours.do(_dm_job).tag("content")
+
+    # Friday 4:15 PM ET PnL leaderboard
+    def _pnl_job():
+        now = datetime.now(_ET)
+        if now.weekday() != 4 or now.hour != 16 or now.minute != 15:
+            return
+        key = f"pnl_lb_{now.date()}"
+        if _last_fired.get(key):
+            return
+        _last_fired[key] = True
+        if _bot_loop:
+            asyncio.run_coroutine_threadsafe(_post_pnl_leaderboard(), _bot_loop)
+
+    _schedule.every(1).minutes.do(_pnl_job).tag("content")
+
+    _feature_summary = [
+        "✅ Feature 1  — Live market context (SPY/QQQ/VIX) injected into all AI posts",
+        "✅ Feature 2  — /trade slash command → #live-calls alert + thread",
+        "✅ Feature 3  — /watchlist slash command → #watchlist embed",
+        "✅ Feature 4  — /pnl slash command + Friday 4:15 PM leaderboard",
+        "✅ Feature 5  — TradingView webhook server on port 8080",
+        "✅ Feature 6  — 3-DM welcome sequence (DM1 immediate, DM2@24h, DM3@48h)",
+        "✅ Feature 7  — Voice channel announcements for co-founders",
+        "✅ Feature 8  — Auto-moderator (links, banned phrases, spam repeat)",
+        "✅ Feature 9  — Milestone announcements (50/100/250/500/1000 members)",
+        "✅ Feature 10 — /clip command → #wins",
+    ]
+    for line in _feature_summary:
+        jarvis_log.info(line)
+        print(f"[Features] {line}")
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── INDICATOR SYSTEM (Features A–C) ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_INDICATOR_SETUP_TEXT = """🍜 **LANGSTON VOLATILITY CAPTURE — SETUP GUIDE**
+
+⚙️ **RECOMMENDED SETTINGS**
+• "Require 1H structure" → OFF
+• All other settings → leave at default
+• Chart: works on 30s, 2m, 30m, and 1H
+
+🔔 **ALERTS — ALREADY HANDLED FOR YOU**
+You don't need to set up anything. The team's signals post
+automatically in #markys-alerts, 24/7, labeled by chart timeframe
+(30s ⚡ / 2m 🎯 / 30m 📈 / 1H 🏛).
+
+Just keep notifications ON for #markys-alerts. That's it.
+
+Running the indicator on your own charts? The signal arrows,
+labels, and dashboard work out of the box — no alerts needed.
+
+🎯 **HOW WE TRADE THE SIGNALS — READ THIS TWICE**
+
+🔴 **ENTRY:** The RED DOTTED LINE is your entry.
+Not the label's entry price — the RED DOTTED LINE.
+Let price come back to you. Don't chase the burst.
+
+🛑 **STOP:** If you enter at the red line, the labeled SL is
+now YOUR ENTRY — so set your own stop 9 points beyond
+your fill. No stop = no trade. Ever.
+
+💰 **PROFIT:** TP levels are guides, not homework.
+In profit? Take it ANYTIME. Nobody ever went broke
+taking profit. Don't let a green trade turn red waiting
+for a target.
+
+This is how the kitchen eats. 🍜
+
+⚠️ Not financial advice. Manage your own risk. 🍜👑"""
+
+_INDICATOR_SYSTEM_PROMPT = """You are Jarvis, the official AI for The Soup Kitchen trading Discord.
+You are an expert on the Langston Volatility Capture indicator. Answer questions about it in the
+confident, sharp Soup Kitchen voice — concise, practical, no fluff.
+
+INDICATOR KNOWLEDGE BASE:
+- 4 market phases: QUIET (sit out), COLLECTING (hunting season — be ready), LEG (the big move is here), STAND DOWN (blocked by structure — don't trade)
+- Signals graded ⭐ to ⭐⭐⭐: more stars = signal fired at or through a key level = higher conviction trade
+- Labels show: E (entry price), SL (stop loss), T1/T2/T3 (three targets)
+- 🚀 LEG signals are runners with wider stops — different trade type than scalps, let them breathe
+- Yellow dots = hunting conditions active (COLLECTING phase)
+- Orange stepped lines = the collection range — price coiling before the move
+- Recommended settings: "Require 1H structure" OFF, run on 30s/2m/30m/1H, minimum ⭐⭐ on the 30-second chart
+- ENTRY RULE (emphasize this hard): The RED DOTTED LINE is the entry — NOT the label's entry price. Let price come back. Never chase the burst.
+- STOP RULE (emphasize this hard): When you enter at the red dotted line, the labeled SL becomes your entry — so set your actual stop 9 points beyond your fill. No stop = no trade. Ever.
+- PROFIT RULE (emphasize this hard): TP levels are guides, not requirements. In profit anytime? Take it. Nobody went broke taking profit. Don't let a green trade turn red waiting for a target.
+- If anyone asks about entries, stops, the red line, or how to manage a trade, hammer these three rules clearly and directly.
+- Signals post automatically in #markys-alerts labeled by timeframe — members don't set up alerts. If someone specifically asks about webhooks or how alerts are wired, tell them that's admin infrastructure and to ping @Admin.
+- Access is invite-only via TradingView — members request access through the server
+
+SETUP GUIDE (full text):
+""" + _INDICATOR_SETUP_TEXT + """
+
+Always end answers with: "Not financial advice — manage your risk 🍜"
+Keep answers concise (3–6 sentences) unless a detailed walkthrough is needed."""
+
+_INDICATOR_KEYWORDS = {
+    "indicator", "langston", "volatility capture", "lvc",
+    "alert", "signal", "signals", "settings", "stars",
+    "phase", "phases", "quiet", "collecting", "leg", "stand down",
+    "webhook", "30s", "2m", "30m", "1h", "entry", "dotted line",
+    "yellow dot", "orange line", "wick",
+}
+
+
+async def _get_indicator_ai_response(question: str, username: str) -> str:
+    """Call Claude with the indicator system prompt."""
+    if not claude_client:
+        return "AI is offline right now — check back soon. 🍜"
+    try:
+        def _call():
+            return claude_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                system=_INDICATOR_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": f"{username} asks: {question}"}],
+            )
+        resp = await asyncio.to_thread(_call)
+        return resp.content[0].text.strip()
+    except Exception as exc:
+        jarvis_log.error(f"Indicator AI error: {exc}")
+        return "Something went wrong on my end — try again in a sec. 🍜"
+
+
+def _is_indicator_question(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in lower for kw in _INDICATOR_KEYWORDS)
+
+
+# ─── /webhookinfo — admin-only, mod-chat only ────────────────────────────────
+
+@_slash_tree.command(name="webhookinfo", description="Show TradingView webhook URLs (Admin only, #mod-chat only)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_webhookinfo(interaction: discord.Interaction):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if interaction.channel.name != _MOD_CHANNEL:
+        await interaction.response.send_message("❌ Use this command in #mod-chat only.", ephemeral=True)
+        return
+    info = (
+        "🔐 **TRADINGVIEW WEBHOOK URLS — ADMIN ONLY**\n\n"
+        "```\n"
+        "30s chart  →  https://jarvis-production-f7c4.up.railway.app/30s\n"
+        "2m  chart  →  https://jarvis-production-f7c4.up.railway.app/2m\n"
+        "30m chart  →  https://jarvis-production-f7c4.up.railway.app/30m\n"
+        "1H  chart  →  https://jarvis-production-f7c4.up.railway.app/1h\n"
+        "Legacy     →  https://jarvis-production-f7c4.up.railway.app/\n"
+        "```\n"
+        "Each URL accepts a TradingView `Any alert() function call` alert.\n"
+        "All post to #marky-alerts with @everyone and the timeframe label.\n"
+        "Keep these out of public channels. 🍜"
+    )
+    await interaction.response.send_message(info, ephemeral=True)
+    jarvis_log.info(f"WEBHOOKINFO accessed by {interaction.user.display_name}")
+
+
+# ─── FEATURE A: Timeframe-labeled webhook routes ──────────────────────────────
+
+_TF_LABELS = {
+    "30s": "📊 Chart: 30-Second ⚡",
+    "2m":  "📊 Chart: 2-Minute 🎯",
+    "30m": "📊 Chart: 30-Minute 📈",
+    "1h":  "📊 Chart: 1-Hour 🏛",
+}
+
+
+def _make_tf_handler(tf_label: str):
+    """Return an aiohttp handler that injects a timeframe label into the alert."""
+    async def _handler(request: _aiohttp_web.Request) -> _aiohttp_web.Response:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            jarvis_log.error(f"Webhook [{tf_label}]: bad JSON — {exc}")
+            return _aiohttp_web.Response(status=400, text="Bad JSON")
+
+        ticker  = str(payload.get("ticker", "")).strip().upper()
+        action  = str(payload.get("action", "")).strip().upper()
+        price   = payload.get("price", "N/A")
+        message = payload.get("message", "")
+
+        jarvis_log.info(f"WEBHOOK [{tf_label}]: ticker={ticker} action={action} price={price}")
+
+        if not ticker:
+            jarvis_log.error(f"Webhook [{tf_label}]: missing ticker")
+            return _aiohttp_web.Response(status=400, text="Missing ticker")
+
+        now_str = datetime.now(_ET).strftime("%I:%M %p ET")
+
+        # Map compact label → prominent header line
+        _tf_header_map = {
+            "📊 Chart: 30-Second ⚡": "📊 **30-SECOND ⚡ SIGNAL**",
+            "📊 Chart: 2-Minute 🎯":  "📊 **2-MINUTE 🎯 SIGNAL**",
+            "📊 Chart: 30-Minute 📈": "📊 **30-MINUTE 📈 SIGNAL**",
+            "📊 Chart: 1-Hour 🏛":    "📊 **1-HOUR 🏛 SIGNAL**",
+        }
+        header_line = _tf_header_map.get(tf_label, f"📊 **{tf_label}**") if tf_label else ""
+
+        body = f"@everyone\n"
+        if header_line:
+            body += f"{header_line}\n"
+        body += (
+            f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Action: {action} triggered at ${price}\n"
+            f"Message: {message}\n"
+            f"Time: {now_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ Not financial advice. Manage your risk. 🍜"
+        )
+
+        async def _post():
+            guild = client.get_guild(GUILD_ID)
+            if not guild:
+                return
+            me = guild.me
+            if me and not me.guild_permissions.mention_everyone:
+                jarvis_log.warning("PERMISSION WARNING: Jarvis lacks 'Mention @everyone'")
+            ch = discord.utils.get(guild.text_channels, name="marky-alerts")
+            if not ch:
+                try:
+                    category = discord.utils.get(guild.categories, name="🔒 PAID ALERTS")
+                    ch = await guild.create_text_channel(
+                        "marky-alerts",
+                        category=category,
+                        topic="Marky's live trade signals — Langston Volatility Capture. 🍜",
+                    )
+                    jarvis_log.info("Created #marky-alerts channel")
+                except Exception as exc:
+                    jarvis_log.error(f"Could not create #marky-alerts: {exc}")
+                    ch = _ch(guild, _LIVE_CALLS_CHANNEL)
+            if not ch:
+                return
+            msg = await ch.send(body, allowed_mentions=discord.AllowedMentions(everyone=True))
+            try:
+                thread_name = f"${ticker} {tf_label.split(':')[1].strip().split(' ')[0] if tf_label else 'Alert'} Discussion"
+                await msg.create_thread(name=thread_name[:100])
+            except Exception as exc:
+                jarvis_log.warning(f"Webhook thread error: {exc}")
+
+        if _bot_loop:
+            asyncio.run_coroutine_threadsafe(_post(), _bot_loop)
+
+        return _aiohttp_web.Response(status=200, text="OK")
+
+    return _handler
+
+
+# Register the new timeframe routes by patching _start_webhook_server
+_orig_start_webhook_server = _start_webhook_server
+
+async def _start_webhook_server():
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        app = _aiohttp_web.Application()
+
+        # Legacy routes (unchanged)
+        app.router.add_post("/webhook", _handle_tv_webhook)
+        app.router.add_post("/",        _handle_tv_webhook)
+
+        # Timeframe-labeled routes
+        for tf, label in _TF_LABELS.items():
+            app.router.add_post(f"/{tf}", _make_tf_handler(label))
+            jarvis_log.info(f"Webhook route registered: POST /{tf} → {label}")
+
+        runner = _aiohttp_web.AppRunner(app)
+        await runner.setup()
+        site = _aiohttp_web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        routes = ["/", "/webhook", "/30s", "/2m", "/30m", "/1h"]
+        jarvis_log.info(f"Webhook server on 0.0.0.0:{port} — routes: {routes}")
+        print(f"[Webhook] Server online — port {port} — routes: {routes}")
+    except Exception as exc:
+        jarvis_log.error(f"Webhook server failed to start: {exc}")
+        print(f"[Webhook] Failed to start: {exc}")
+
+
+# ─── FEATURE B: /indicator slash command ─────────────────────────────────────
+
+@_slash_tree.command(name="indicator", description="Langston Volatility Capture — setup guide and alert URLs")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_indicator(interaction: discord.Interaction):
+    await interaction.response.send_message(_INDICATOR_SETUP_TEXT)
+    jarvis_log.info(f"INDICATOR guide sent to {interaction.user.display_name} in #{interaction.channel.name}")
+
+
+# ─── FEATURE C: Indicator keyword detection in @mention handler ───────────────
+# Chain the existing on_message to intercept indicator questions before
+# they reach the general AI, routing them to the specialist system prompt.
+
+_prev_on_message_indicator = client.on_message
+
+@client.event
+async def on_message(message):
+    try:
+        await _prev_on_message_indicator(message)
+    except Exception as exc:
+        jarvis_log.error(f"on_message indicator chain error: {exc}")
+
+    # Only intercept @Jarvis messages that look like indicator questions
+    if message.author.bot or message.guild is None:
+        return
+    if message.guild.id != GUILD_ID:
+        return
+    if client.user not in message.mentions:
+        return
+
+    content = re.sub(r"<@!?\d+>", "", message.content).strip()
+    if not content or not _is_indicator_question(content):
+        return
+
+    # Skip commands already handled upstream (help, testpost, static commands, market commands)
+    content_lower = content.lower()
+    skip_prefixes = ("help", "testpost", "price", "technicals", "ta", "options",
+                     "flow", "levels", "info", "movers", "sectors", "market",
+                     "crypto", "coin", "fear", "greed", "earnings", "news",
+                     "calendar", "econ", "prep", "rules", "access", "channels",
+                     "gm", "disclaimer")
+    if any(content_lower == p or content_lower.startswith(p + " ") for p in skip_prefixes):
+        return
+
+    jarvis_log.info(f"INDICATOR Q: {message.author.display_name}: {content[:80]}")
+    try:
+        async with message.channel.typing():
+            answer = await _get_indicator_ai_response(content, message.author.display_name)
+        await message.reply(answer, mention_author=False)
+    except Exception as exc:
+        jarvis_log.error(f"Indicator AI reply error: {exc}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD 1 — TOP TRADER CROWN SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+_TOP_TRADER_ROLE_NAME  = "👑 Top Trader"
+_TOP_TRADER_ROLE_COLOR = discord.Color(0xF1C40F)
+
+# Track the pinned leaderboard message so we can unpin it next week
+_crown_pinned_msg_id: int = 0
+
+
+async def _get_or_create_top_trader_role(guild: discord.Guild) -> discord.Role:
+    """Return the 👑 Top Trader role, creating it if it doesn't exist."""
+    role = discord.utils.get(guild.roles, name=_TOP_TRADER_ROLE_NAME)
+    if role:
+        return role
+
+    # Position: above Paid Member, below Moderator
+    paid_role = discord.utils.get(guild.roles, name="Paid Member")
+    position = (paid_role.position + 1) if paid_role else 1
+
+    role = await guild.create_role(
+        name=_TOP_TRADER_ROLE_NAME,
+        color=_TOP_TRADER_ROLE_COLOR,
+        hoist=True,
+        reason="Top Trader Crown system initialised",
+    )
+    # Move to the right position
+    try:
+        await role.edit(position=position)
+    except Exception as exc:
+        jarvis_log.warning(f"CROWN: could not reposition role — {exc}")
+
+    jarvis_log.info(f"CROWN: Created role '{_TOP_TRADER_ROLE_NAME}'")
+    return role
+
+
+async def _crown_top_trader():
+    """Post leaderboard, then crown the week's top PnL trader."""
+    global _crown_pinned_msg_id
+
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    wins_ch = _ch(guild, _WINS_CHANNEL)
+    if not wins_ch:
+        jarvis_log.error("CROWN: #wins channel not found")
+        return
+
+    # ── Load PnL data ──
+    data    = _pnl_load()
+    entries = data.get("entries", [])
+
+    if not entries:
+        await wins_ch.send(
+            "No PnL logged this week. The throne sits empty. "
+            "Log your trades with /pnl. 👑"
+        )
+        jarvis_log.info("CROWN: No entries this week — throne empty message posted")
+        _pnl_save({"entries": [], "week_start": str(_date.today())})
+        return
+
+    # ── Build leaderboard ──
+    totals: dict = {}
+    for e in entries:
+        uid = e["user_id"]
+        if uid not in totals:
+            totals[uid] = {"username": e["username"], "total": 0.0}
+        totals[uid]["total"] += e["amount"]
+
+    ranked   = sorted(totals.items(), key=lambda x: x[1]["total"], reverse=True)
+    top_uid  = ranked[0][0]
+    top_data = ranked[0][1]
+    green    = sum(1 for _, v in totals.items() if v["total"] >= 0)
+    red      = len(totals) - green
+
+    week_start = data.get("week_start", str(_date.today()))
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = [
+        "🏆 **WEEKLY PNL LEADERBOARD**",
+        f"Week of {week_start} — {datetime.now(_ET).strftime('%B %d, %Y')}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for i, (uid, v) in enumerate(ranked[:10]):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        s = "+" if v["total"] >= 0 else ""
+        lines.append(f"{medal} @{v['username']}    {s}${v['total']:.0f}")
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📊 Total members reporting: {len(totals)}",
+        f"💚 Green on the week: {green}",
+        f"🔴 Red on the week: {red}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Post your trades in the server.",
+        "The kitchen runs on proof. 🍜👑",
+    ]
+
+    lb_msg = await wins_ch.send("\n".join(lines))
+    jarvis_log.info(f"CROWN: Leaderboard posted — {len(totals)} traders")
+
+    # ── Pin leaderboard, unpin last week's ──
+    try:
+        if _crown_pinned_msg_id:
+            try:
+                old_msg = await wins_ch.fetch_message(_crown_pinned_msg_id)
+                await old_msg.unpin()
+                jarvis_log.info(f"CROWN: Unpinned previous leaderboard {_crown_pinned_msg_id}")
+            except Exception:
+                pass
+        await lb_msg.pin()
+        _crown_pinned_msg_id = lb_msg.id
+        jarvis_log.info(f"CROWN: Pinned new leaderboard {lb_msg.id}")
+    except Exception as exc:
+        jarvis_log.warning(f"CROWN: pin/unpin error — {exc}")
+
+    # ── Transfer crown ──
+    crown_role = await _get_or_create_top_trader_role(guild)
+
+    # Remove from current holder(s)
+    for m in guild.members:
+        if crown_role in m.roles:
+            try:
+                await m.remove_roles(crown_role, reason="Weekly crown transfer")
+                jarvis_log.info(f"CROWN: Removed from {m.display_name}")
+            except Exception as exc:
+                jarvis_log.warning(f"CROWN: Could not remove from {m.display_name}: {exc}")
+
+    # Assign to new winner
+    winner = guild.get_member(int(top_uid))
+    if winner:
+        try:
+            await winner.add_roles(crown_role, reason="Top Trader of the week")
+            jarvis_log.info(f"CROWN: Awarded to {winner.display_name} (${top_data['total']:.0f})")
+        except Exception as exc:
+            jarvis_log.warning(f"CROWN: Could not assign to {winner.display_name}: {exc}")
+    else:
+        jarvis_log.warning(f"CROWN: Winner UID {top_uid} not found in guild")
+
+    # ── Crowning announcement ──
+    sign   = "+" if top_data["total"] >= 0 else ""
+    amount = f"{sign}${top_data['total']:.0f}"
+    mention = winner.mention if winner else f"@{top_data['username']}"
+    crown_msg = (
+        f"👑 **NEW TOP TRADER CROWNED** 👑\n"
+        f"{mention} takes the throne with {amount} on the week.\n"
+        f"The crown is theirs until next Friday. Come take it. 🍜"
+    )
+    await wins_ch.send(crown_msg)
+    jarvis_log.info("CROWN: Crowning announcement posted")
+
+    # ── Reset PnL for next week ──
+    _pnl_save({"entries": [], "week_start": str(_date.today())})
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD 2 — STAGE CHANNEL FOR LIVE STREAMING
+# (The setup function _setup_live_trading_stage already handles Community
+#  check, category, stage channel, and live-chat.  We only need to wire
+#  the Build 2 variant with the correct channel name and trigger the
+#  general-chat announcement when a co-founder starts a Stage instance.)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# The voice-state handler already exists (Feature 7).  We extend it here
+# with a chain to catch Stage-instance-started events and post to #general-chat.
+
+_prev_on_voice_b2 = client.on_voice_state_update
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    try:
+        await _prev_on_voice_b2(member, before, after)
+    except Exception as exc:
+        jarvis_log.error(f"on_voice_state_update build2 chain error: {exc}")
+
+    if member.guild.id != GUILD_ID:
+        return
+    if member.id == 0 or member.id not in _COFOUNDER_IDS:
+        return
+
+    # Co-founder joined a Stage channel (started a session)
+    joined_stage = (
+        before.channel != after.channel
+        and after.channel is not None
+        and isinstance(after.channel, discord.StageChannel)
+    )
+    if not joined_stage:
+        return
+
+    guild = member.guild
+    general = discord.utils.get(guild.text_channels, name="general-chat")
+    if not general:
+        general = discord.utils.get(guild.text_channels, name="general")
+    if not general:
+        jarvis_log.warning("BUILD2: #general-chat not found for stage announcement")
+        return
+
+    stage_mention = after.channel.mention if after.channel else "🎙️・SOUP KITCHEN LIVE"
+    await general.send(
+        f"🎙️ **THE KITCHEN IS LIVE** — pull up to {stage_mention}. 🍜👑"
+    )
+    jarvis_log.info(f"BUILD2: Stage live announcement posted for {member.display_name}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD 3 — WIRE EVERYTHING ON READY + POST ANNOUNCEMENT
+# ═════════════════════════════════════════════════════════════════════════════
+
+_prev_on_ready_build3 = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_build3()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready build3 chain error: {exc}")
+
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    # Ensure 👑 Top Trader role exists from the start
+    try:
+        await _get_or_create_top_trader_role(guild)
+        jarvis_log.info("BUILD3: 👑 Top Trader role verified/created on startup")
+    except Exception as exc:
+        jarvis_log.error(f"BUILD3: role setup error: {exc}")
+
+    # Replace the existing Friday leaderboard job with the crown version
+    # (schedule the crown job; the plain leaderboard job still exists but
+    #  _crown_top_trader does everything _post_pnl_leaderboard did + more)
+    import schedule as _sched_b3
+    _sched_b3.every().friday.at("16:15").do(
+        lambda: asyncio.run_coroutine_threadsafe(_crown_top_trader(), _bot_loop)
+    )
+    jarvis_log.info("BUILD3: Crown leaderboard job scheduled — Fridays 4:15 PM ET")
+
+    # ── Post Build 3 announcement to #general-chat ──
+    general = discord.utils.get(guild.text_channels, name="general-chat")
+    if not general:
+        general = discord.utils.get(guild.text_channels, name="general")
+    if general:
+        announcement = (
+            "👑 **NEW: THE TOP TRADER CROWN** 👑\n\n"
+            "Every Friday at market close, the member with the best logged PnL\n"
+            "of the week gets CROWNED — gold name, top of the sidebar,\n"
+            "throne held for one full week.\n\n"
+            "How to compete:\n"
+            "📝 Log your trades all week with /pnl\n"
+            "📸 Receipts in #wins make it official\n"
+            "🏆 Friday 4:15 PM — the leaderboard drops and the crown moves\n\n"
+            "One rule: the crown must be defended every week.\n\n"
+            "🎙️ **ALSO NEW: SOUP KITCHEN LIVE**\n"
+            "A real stage for live trading sessions — streams, screen shares,\n"
+            "market opens, the whole show. Watch for the first session announcement.\n\n"
+            "The kitchen just got louder. 🍜👑"
+        )
+        try:
+            await general.send(announcement)
+            jarvis_log.info("BUILD3: Announcement posted to #general-chat")
+        except Exception as exc:
+            jarvis_log.error(f"BUILD3: announcement error: {exc}")
+    else:
+        jarvis_log.warning("BUILD3: #general-chat not found — announcement skipped")
+
+    print("[Build3] Top Trader Crown + Stage wiring complete.")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
