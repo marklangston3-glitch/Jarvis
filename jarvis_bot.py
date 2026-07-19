@@ -3591,5 +3591,385 @@ async def on_ready():
     print("[Build3] Top Trader Crown + Stage wiring complete.")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# UPGRADE 1 — /poll slash command + AI-triggered polls
+# ═════════════════════════════════════════════════════════════════════════════
+
+_POLL_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+_poll_allowed_roles = {"Admin", "Moderator"}
+
+def _check_poll_permission(interaction: discord.Interaction) -> bool:
+    role_names = {r.name for r in interaction.user.roles}
+    return bool(role_names & _poll_allowed_roles)
+
+
+async def _post_poll(channel: discord.abc.Messageable, question: str, options: list, duration_hours: int = 24):
+    """Post a Discord native poll; fall back to reaction embed if it fails."""
+    # Clamp duration to Discord's allowed range (1–336 h)
+    duration_hours = max(1, min(336, duration_hours))
+
+    # ── Try native Discord Poll (requires discord.py ≥ 2.4) ──
+    try:
+        answers = [discord.PollAnswer(text=opt) for opt in options]
+        poll = discord.Poll(question=question, duration=datetime.timedelta(hours=duration_hours), answers=answers)
+        await channel.send(poll=poll)
+        jarvis_log.info(f"POLL: Native poll posted — '{question}' ({len(options)} options, {duration_hours}h)")
+        return
+    except Exception as exc:
+        jarvis_log.warning(f"POLL: Native poll failed ({exc}) — falling back to reaction embed")
+
+    # ── Fallback: embed with numbered reactions ──
+    lines = [f"{_POLL_EMOJI[i]}  {opt}" for i, opt in enumerate(options[:10])]
+    embed = discord.Embed(
+        title=f"📊 {question}",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"React to vote • Poll closes in {duration_hours}h")
+    msg = await channel.send(embed=embed)
+    for i in range(len(options[:10])):
+        try:
+            await msg.add_reaction(_POLL_EMOJI[i])
+        except Exception:
+            pass
+    jarvis_log.info(f"POLL: Reaction fallback poll posted — '{question}'")
+
+
+@_slash_tree.command(name="poll", description="Create a poll (Admin / Moderator only)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(
+    question="The poll question",
+    options="Comma-separated options (2–10)",
+    duration="Duration in hours (default 24)",
+)
+async def _cmd_poll(
+    interaction: discord.Interaction,
+    question: str,
+    options: str,
+    duration: int = 24,
+):
+    if not _check_poll_permission(interaction):
+        await interaction.response.send_message(
+            "❌ Only Admins and Moderators can create polls.", ephemeral=True
+        )
+        return
+
+    parsed = [o.strip() for o in options.split(",") if o.strip()]
+    if len(parsed) < 2:
+        await interaction.response.send_message(
+            "❌ Provide at least 2 comma-separated options.", ephemeral=True
+        )
+        return
+    if len(parsed) > 10:
+        await interaction.response.send_message(
+            "❌ Maximum 10 options allowed.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(f"⏳ Creating poll…", ephemeral=True)
+    await _post_poll(interaction.channel, question, parsed, duration)
+    jarvis_log.info(f"POLL: /poll used by {interaction.user.display_name}")
+
+
+async def _ai_generate_poll(topic: str, channel: discord.abc.Messageable):
+    """Ask Claude to generate a poll question + options, then post it."""
+    if not ANTHROPIC_API_KEY:
+        await channel.send("❌ AI poll generation is unavailable — API key not set.")
+        return
+
+    import anthropic as _ant
+    _ac = _ant.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    prompt = (
+        f"You are creating a Discord poll for a trading community called The Soup Kitchen. "
+        f"Generate a poll about: {topic}\n\n"
+        f"Respond ONLY in this exact format (no other text):\n"
+        f"QUESTION: <the poll question>\n"
+        f"OPTIONS: <option1>, <option2>, <option3>\n\n"
+        f"2–5 options. Keep it trading/finance focused and concise."
+    )
+    resp = await _ac.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    question, options_str = "", ""
+    for line in text.splitlines():
+        if line.startswith("QUESTION:"):
+            question = line.split("QUESTION:", 1)[1].strip()
+        elif line.startswith("OPTIONS:"):
+            options_str = line.split("OPTIONS:", 1)[1].strip()
+
+    if not question or not options_str:
+        await channel.send("❌ Couldn't generate poll — AI response was malformed.")
+        return
+
+    parsed = [o.strip() for o in options_str.split(",") if o.strip()]
+    if len(parsed) < 2:
+        await channel.send("❌ AI didn't return enough options to make a poll.")
+        return
+
+    await _post_poll(channel, question, parsed, 24)
+
+
+# Detect "make a poll" in co-founder @mention messages
+_POLL_TRIGGER = re.compile(r"\b(make|create|post|run|start)\s+a?\s*poll\b", re.IGNORECASE)
+
+_prev_on_message_poll = client.on_message
+
+@client.event
+async def on_message(message):
+    try:
+        await _prev_on_message_poll(message)
+    except Exception as exc:
+        jarvis_log.error(f"on_message poll chain error: {exc}")
+
+    if message.author.bot or message.guild is None or message.guild.id != GUILD_ID:
+        return
+    if client.user not in message.mentions:
+        return
+    if not _is_cofounder(message.author):
+        return
+
+    content = re.sub(r"<@!?\d+>", "", message.content).strip()
+    if not _POLL_TRIGGER.search(content):
+        return
+
+    topic = _POLL_TRIGGER.sub("", content).strip(" about:?.,") or "this week's market outlook"
+    jarvis_log.info(f"POLL: AI poll triggered by {message.author.display_name} — topic: {topic[:60]}")
+    async with message.channel.typing():
+        await _ai_generate_poll(topic, message.channel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# UPGRADE 2 — Live ForexFactory calendar
+# ═════════════════════════════════════════════════════════════════════════════
+
+_FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_CALENDAR_CHANNEL = "jarvis-calendar"
+_FREE_ANALYSIS_CATEGORY = "FREE ANALYSIS"
+
+# Keywords that should trigger live calendar context injection
+_CALENDAR_KEYWORDS = {
+    "calendar", "earnings", "red folder", "news this week", "fomc",
+    "cpi", "nfp", "economic", "fed", "jobs report", "pce", "gdp",
+    "unemployment", "retail sales", "ppi", "ism", "interest rate",
+    "week ahead", "this week", "macro",
+}
+
+
+async def _fetch_ff_calendar() -> list:
+    """
+    Fetch ForexFactory this-week calendar. Returns list of high-impact USD events.
+    Each item: {title, date, time, country, impact, forecast, previous}
+    Returns empty list on failure (caller must handle).
+    """
+    try:
+        async with _aiohttp.ClientSession() as session:
+            async with session.get(
+                _FF_CALENDAR_URL,
+                headers={"User-Agent": "JarvisBot/1.0"},
+                timeout=_aiohttp.ClientTimeout(total=10),
+                ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    jarvis_log.warning(f"CALENDAR: Feed returned HTTP {resp.status}")
+                    return []
+                data = await resp.json(content_type=None)
+
+        # Log first entry on first fetch to confirm field names in Railway logs
+        if data:
+            jarvis_log.info(f"CALENDAR: Feed fields sample: {list(data[0].keys())} | impact values: {set(e.get('impact','') for e in data[:20])}")
+
+        # ForexFactory uses "High" for impact; country "USD"
+        high_usd = [
+            e for e in data
+            if e.get("country", "").upper() == "USD"
+            and e.get("impact", "").lower() in ("high", "red")
+        ]
+        jarvis_log.info(f"CALENDAR: {len(high_usd)} USD high-impact events fetched")
+        return high_usd
+    except Exception as exc:
+        jarvis_log.error(f"CALENDAR: Fetch failed — {exc}")
+        return []
+
+
+def _format_calendar_events(events: list, week_label: str = "") -> str:
+    """Format a list of FF events into the red-folder block."""
+    if not week_label:
+        week_label = datetime.now(_ET).strftime("%B %d, %Y")
+
+    if not events:
+        return (
+            f"📅 **THIS WEEK'S RED FOLDER** — {week_label}\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "No high-impact USD events found this week — or the feed is down.\n"
+            "Check ForexFactory directly. 🍜\n"
+            "━━━━━━━━━━━━━━━━━━━"
+        )
+
+    lines = [
+        f"📅 **THIS WEEK'S RED FOLDER** — {week_label}",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+    for e in events:
+        # FF date field: "2025-07-21T00:00:00-05:00" or similar ISO string
+        raw_date = e.get("date", "")
+        raw_time = e.get("time", "")
+        title    = e.get("title", e.get("name", "Unknown Event"))
+        try:
+            import dateutil.parser as _dup
+            dt = _dup.parse(raw_date)
+            day_str  = dt.strftime("%A")
+            date_str = dt.strftime("%b %d")
+        except Exception:
+            day_str  = raw_date[:10] if raw_date else "TBD"
+            date_str = ""
+        time_str = raw_time if raw_time else "All Day"
+        lines.append(f"🔴 **{day_str} {date_str}** {time_str} ET — {title}")
+
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━",
+        "Trade around these or don't trade them at all. 🍜",
+    ]
+    return "\n".join(lines)
+
+
+@_slash_tree.command(name="calendar", description="This week's red-folder economic events")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_calendar(interaction: discord.Interaction):
+    await interaction.response.defer()
+    events = await _fetch_ff_calendar()
+    if events is None:
+        await interaction.followup.send(
+            "Calendar feed is down — check ForexFactory directly. 🍜"
+        )
+        return
+    week_label = datetime.now(_ET).strftime("week of %B %d, %Y")
+    text = _format_calendar_events(events, week_label)
+    await interaction.followup.send(text)
+    jarvis_log.info(f"CALENDAR: /calendar used by {interaction.user.display_name}")
+
+
+async def _get_calendar_context() -> str:
+    """Return a concise calendar context string to inject into AI prompts."""
+    events = await _fetch_ff_calendar()
+    if not events:
+        return ""
+    lines = ["HIGH-IMPACT USD ECONOMIC EVENTS THIS WEEK (live data):"]
+    for e in events:
+        raw_date = e.get("date", "")
+        raw_time = e.get("time", "")
+        title    = e.get("title", e.get("name", "?"))
+        try:
+            import dateutil.parser as _dup
+            dt = _dup.parse(raw_date)
+            day_str = dt.strftime("%A %b %d")
+        except Exception:
+            day_str = raw_date[:10]
+        forecast = e.get("forecast", "")
+        previous = e.get("previous", "")
+        detail   = f" (forecast: {forecast}, prev: {previous})" if forecast or previous else ""
+        lines.append(f"  • {day_str} {raw_time} ET — {title}{detail}")
+    return "\n".join(lines)
+
+
+def _is_calendar_question(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in _CALENDAR_KEYWORDS)
+
+
+# Chain the @mention handler to inject live calendar context for calendar questions
+_prev_on_message_cal = client.on_message
+
+@client.event
+async def on_message(message):
+    try:
+        await _prev_on_message_cal(message)
+    except Exception as exc:
+        jarvis_log.error(f"on_message calendar chain error: {exc}")
+
+    if message.author.bot or message.guild is None or message.guild.id != GUILD_ID:
+        return
+    if client.user not in message.mentions:
+        return
+
+    content = re.sub(r"<@!?\d+>", "", message.content).strip()
+    if not content or not _is_calendar_question(content):
+        return
+
+    # Skip if it's also an indicator question (already handled upstream)
+    if _is_indicator_question(content):
+        return
+
+    jarvis_log.info(f"CALENDAR Q: {message.author.display_name}: {content[:80]}")
+    async with message.channel.typing():
+        cal_ctx = await _get_calendar_context()
+        if not cal_ctx:
+            await message.reply(
+                "Calendar feed is down right now — check ForexFactory directly. 🍜",
+                mention_author=False,
+            )
+            return
+
+        full_prompt = (
+            f"{cal_ctx}\n\n"
+            f"Answer this question using ONLY the live data above — never use training-data dates: "
+            f"{content}"
+        )
+        try:
+            answer = await _gen_content(full_prompt)
+            await message.reply(answer, mention_author=False)
+        except Exception as exc:
+            jarvis_log.error(f"CALENDAR AI reply error: {exc}")
+
+
+async def _post_weekly_calendar():
+    """Sunday 7:30 PM ET — post red-folder rundown to #jarvis-calendar."""
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    # Find or create #jarvis-calendar in FREE ANALYSIS category
+    ch = discord.utils.get(guild.text_channels, name=_CALENDAR_CHANNEL)
+    if not ch:
+        cat = discord.utils.get(guild.categories, name=_FREE_ANALYSIS_CATEGORY)
+        try:
+            ch = await guild.create_text_channel(
+                _CALENDAR_CHANNEL,
+                category=cat,
+                topic="Weekly red-folder economic calendar — auto-posted every Sunday. 🍜",
+            )
+            jarvis_log.info(f"CALENDAR: Created #{_CALENDAR_CHANNEL}")
+        except Exception as exc:
+            jarvis_log.error(f"CALENDAR: Could not create #{_CALENDAR_CHANNEL}: {exc}")
+            return
+
+    events = await _fetch_ff_calendar()
+    week_label = datetime.now(_ET).strftime("week of %B %d, %Y")
+    text = _format_calendar_events(events, week_label)
+    await ch.send(text)
+    jarvis_log.info("CALENDAR: Weekly calendar posted")
+
+
+# Wire the Sunday 7:30 PM schedule into the existing on_ready chain
+_prev_on_ready_cal = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_cal()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready calendar chain error: {exc}")
+
+    import schedule as _sched_cal
+    _sched_cal.every().sunday.at("19:30").do(
+        lambda: asyncio.run_coroutine_threadsafe(_post_weekly_calendar(), _bot_loop)
+    )
+    jarvis_log.info("CALENDAR: Sunday 7:30 PM ET calendar job scheduled")
+    print("[Calendar] Weekly calendar job scheduled.")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
