@@ -1549,7 +1549,7 @@ async def _create_poll_from_request(message: discord.Message, request_text: str)
         try:
             poll = discord.Poll(
                 question=question,
-                duration=datetime.timedelta(hours=24),
+                duration=timedelta(hours=24),
                 multiple=False,
             )
             for opt in options[:10]:
@@ -3716,7 +3716,7 @@ async def _post_poll(channel: discord.abc.Messageable, question: str, options: l
     # ── Try native Discord Poll (requires discord.py ≥ 2.4) ──
     try:
         answers = [discord.PollAnswer(text=opt) for opt in options]
-        poll = discord.Poll(question=question, duration=datetime.timedelta(hours=duration_hours), answers=answers)
+        poll = discord.Poll(question=question, duration=timedelta(hours=duration_hours), answers=answers)
         await channel.send(poll=poll)
         jarvis_log.info(f"POLL: Native poll posted — '{question}' ({len(options)} options, {duration_hours}h)")
         return
@@ -3844,9 +3844,9 @@ async def _fetch_ff_calendar() -> list:
         async with _aiohttp.ClientSession() as session:
             async with session.get(
                 _FF_CALENDAR_URL,
-                headers={"User-Agent": "JarvisBot/1.0"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
                 timeout=_aiohttp.ClientTimeout(total=10),
-                ssl=False,
+                ssl=True,
             ) as resp:
                 if resp.status != 200:
                     jarvis_log.warning(f"CALENDAR: Feed returned HTTP {resp.status}")
