@@ -1481,6 +1481,16 @@ async def on_message(message):
             await message.reply(f"❌ Something went wrong running that command.", mention_author=False)
         return
 
+    # ── Founder poll intercept — BEFORE general AI reply ─────────────────────
+    _POLL_INTENT_RE = re.compile(
+        r"\b(make|create|post|run|start)\b.{0,40}\bpoll\b|\bpoll\b.{0,40}\b(make|create|post|run|start)\b",
+        re.IGNORECASE,
+    )
+    if _is_cofounder(message.author) and _POLL_INTENT_RE.search(content):
+        await _create_poll_from_request(message, content)
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
     role_names = [r.name for r in message.author.roles if r.name != "@everyone"]
     try:
         async with message.channel.typing():
@@ -1489,6 +1499,76 @@ async def on_message(message):
     except Exception as e:
         print(f"Reply error: {e}")
 
+
+
+async def _create_poll_from_request(message: discord.Message, request_text: str):
+    """
+    Called when a founder asks Jarvis to make a poll.
+    1. Calls Claude to extract question + options as JSON.
+    2. Posts a native discord.Poll.
+    3. Replies 'Poll's live 🍜' on success.
+    4. On ANY exception, logs full traceback and posts the error in channel — never falls back to text.
+    """
+    import traceback as _tb, json as _json
+
+    if not ANTHROPIC_API_KEY:
+        await message.channel.send("❌ Poll generation unavailable — ANTHROPIC_API_KEY not set.")
+        return
+
+    async with message.channel.typing():
+        try:
+            import anthropic as _ant
+            _ac = _ant.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+            extraction_prompt = (
+                "Extract a poll question and 2-4 short answer options from the following request. "
+                "Return ONLY valid JSON, nothing else, in this exact shape:\n"
+                "{\"question\":\"...\",\"options\":[\"...\",\"...\"]}\n\n"
+                f"Request: {request_text}"
+            )
+            resp = await _ac.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                messages=[{"role": "user", "content": extraction_prompt}],
+            )
+            raw = resp.content[0].text.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+            parsed = _json.loads(raw)
+            question = parsed["question"]
+            options  = parsed["options"]
+            if not question or len(options) < 2:
+                raise ValueError(f"Bad poll JSON: {parsed}")
+        except Exception as exc:
+            full_tb = _tb.format_exc()
+            print(f"[POLL] Claude extraction error:\n{full_tb}")
+            await message.channel.send(
+                f"❌ Couldn't extract poll from request — AI error:\n```{exc}```"
+            )
+            return
+
+        try:
+            poll = discord.Poll(
+                question=question,
+                duration=datetime.timedelta(hours=24),
+                multiple=False,
+            )
+            for opt in options[:10]:
+                poll.add_answer(text=opt)
+            sent = await message.channel.send(poll=poll)
+            # Confirm poll object is attached
+            if sent.poll is not None:
+                print(f"[POLL] Native poll confirmed on message {sent.id} — question: '{question}'")
+            else:
+                print(f"[POLL] WARNING: sent.poll is None on message {sent.id}")
+            await message.reply("Poll's live 🍜", mention_author=False)
+        except Exception as exc:
+            full_tb = _tb.format_exc()
+            print(f"[POLL] discord.Poll send error:\n{full_tb}")
+            await message.channel.send(
+                f"❌ Poll creation failed — Discord error:\n```{exc}```\n"
+                f"Full traceback in Railway logs."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3711,35 +3791,6 @@ async def _ai_generate_poll(topic: str, channel: discord.abc.Messageable):
         return
 
     await _post_poll(channel, question, parsed, 24)
-
-
-# Detect "make a poll" in co-founder @mention messages
-_POLL_TRIGGER = re.compile(r"\b(make|create|post|run|start)\s+a?\s*poll\b", re.IGNORECASE)
-
-_prev_on_message_poll = client.on_message
-
-@client.event
-async def on_message(message):
-    try:
-        await _prev_on_message_poll(message)
-    except Exception as exc:
-        jarvis_log.error(f"on_message poll chain error: {exc}")
-
-    if message.author.bot or message.guild is None or message.guild.id != GUILD_ID:
-        return
-    if client.user not in message.mentions:
-        return
-    if not _is_cofounder(message.author):
-        return
-
-    content = re.sub(r"<@!?\d+>", "", message.content).strip()
-    if not _POLL_TRIGGER.search(content):
-        return
-
-    topic = _POLL_TRIGGER.sub("", content).strip(" about:?.,") or "this week's market outlook"
-    jarvis_log.info(f"POLL: AI poll triggered by {message.author.display_name} — topic: {topic[:60]}")
-    async with message.channel.typing():
-        await _ai_generate_poll(topic, message.channel)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
