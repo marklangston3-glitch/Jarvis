@@ -211,7 +211,8 @@ intents.reactions = True
 intents.message_content = True
 
 client = discord.Client(intents=intents)
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+claude_client      = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+claude_async_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 verification_message_id = None
 
@@ -1220,14 +1221,31 @@ async def find_verification_message(guild):
     return None
 
 
-async def get_ai_response(user_message, username, role_names=None):
-    if claude_client is None:
-        return "🍜 AI responses aren't configured yet. Try `@Jarvis help` for available commands."
-    role_context = ""
-    if role_names:
-        role_context = f" (roles: {', '.join(role_names)})"
+async def _alert_bot_logs(detail: str):
+    """Post an alert to #bot-logs tagging @Admin when Anthropic auth/credit/rate issues occur."""
     try:
-        response = claude_client.messages.create(
+        guild = client.get_guild(GUILD_ID)
+        if not guild:
+            return
+        ch = discord.utils.get(guild.text_channels, name="bot-logs")
+        if not ch:
+            return
+        admin_role = discord.utils.get(guild.roles, name="Admin")
+        mention = admin_role.mention if admin_role else "@Admin"
+        await ch.send(
+            f"⚠️ {mention} **Jarvis AI error** — members are seeing the fallback response.\n"
+            f"```{detail[:1800]}```"
+        )
+    except Exception:
+        pass  # never let the alerter itself crash the bot
+
+
+async def get_ai_response(user_message, username, role_names=None):
+    if claude_async_client is None:
+        return "🍜 AI responses aren't configured yet. Try `@Jarvis help` for available commands."
+    role_context = f" (roles: {', '.join(role_names)})" if role_names else ""
+    try:
+        response = await claude_async_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=600,
             system=SYSTEM_PROMPT,
@@ -1237,7 +1255,41 @@ async def get_ai_response(user_message, username, role_names=None):
         )
         return response.content[0].text
     except Exception as e:
-        print(f"Claude API error: {e}")
+        import traceback as _tb
+        full_tb = _tb.format_exc()
+        err_str  = str(e)
+        err_type = type(e).__name__
+
+        # Classify the error for a clear log line
+        if hasattr(e, "status_code"):
+            sc = e.status_code
+            if sc == 401:
+                label = "AUTH ERROR (401) — ANTHROPIC_API_KEY is invalid or missing"
+            elif sc == 429:
+                label = "RATE LIMIT (429) — too many requests or plan limit hit"
+            elif sc == 400 and ("credit" in err_str.lower() or "billing" in err_str.lower()):
+                label = "OUT OF CREDITS (400) — Anthropic account needs top-up"
+            elif sc == 400:
+                label = f"BAD REQUEST (400) — {err_str[:200]}"
+            elif sc == 529:
+                label = "ANTHROPIC OVERLOADED (529) — retry later"
+            else:
+                label = f"HTTP {sc} — {err_str[:200]}"
+        else:
+            label = f"{err_type} — {err_str[:200]}"
+
+        print(f"[AI ERROR] {label}\n{full_tb}")
+
+        # Alert #bot-logs for auth/credit/rate issues so admins know immediately
+        needs_admin_alert = (
+            hasattr(e, "status_code") and e.status_code in (401, 429, 400)
+            or "credit" in err_str.lower()
+            or "billing" in err_str.lower()
+            or "invalid" in err_str.lower()
+        )
+        if needs_admin_alert:
+            await _alert_bot_logs(f"{label}\n\nFull error:\n{err_str}")
+
         return "Kitchen's busy right now, try again in a sec. 🍜"
 
 
