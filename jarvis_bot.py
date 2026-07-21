@@ -3310,7 +3310,9 @@ async def _cmd_webhookinfo(interaction: discord.Interaction):
 
 _TF_LABELS = {
     "30s": "📊 Chart: 30-Second ⚡",
+    "1m":  "📊 Chart: 1-Minute ⚡",
     "2m":  "📊 Chart: 2-Minute 🎯",
+    "3m":  "📊 Chart: 3-Minute 🎯",
     "30m": "📊 Chart: 30-Minute 📈",
     "1h":  "📊 Chart: 1-Hour 🏛",
 }
@@ -3341,7 +3343,9 @@ def _make_tf_handler(tf_label: str):
         # Map compact label → prominent header line
         _tf_header_map = {
             "📊 Chart: 30-Second ⚡": "📊 **30-SECOND ⚡ SIGNAL**",
+            "📊 Chart: 1-Minute ⚡":  "📊 **1-MINUTE ⚡ SIGNAL**",
             "📊 Chart: 2-Minute 🎯":  "📊 **2-MINUTE 🎯 SIGNAL**",
+            "📊 Chart: 3-Minute 🎯":  "📊 **3-MINUTE 🎯 SIGNAL**",
             "📊 Chart: 30-Minute 📈": "📊 **30-MINUTE 📈 SIGNAL**",
             "📊 Chart: 1-Hour 🏛":    "📊 **1-HOUR 🏛 SIGNAL**",
         }
