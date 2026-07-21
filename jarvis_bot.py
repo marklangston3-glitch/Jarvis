@@ -4102,5 +4102,230 @@ async def on_ready():
     print("[Calendar] Weekly calendar job scheduled.")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# SCOREBOARD — /scoreboard command + 🔥 Most Consistent role
+# ═════════════════════════════════════════════════════════════════════════════
+
+_CONSISTENT_ROLE_NAME  = "🔥 Most Consistent"
+_CONSISTENT_ROLE_COLOR = discord.Color(0xE67E22)
+
+
+def _build_scoreboard_data(entries: list) -> tuple:
+    """
+    Returns (pnl_ranked, consistency_ranked, total_traders) from raw entries.
+
+    pnl_ranked: list of (uid, {username, total}) sorted by total desc
+    consistency_ranked: list of (uid, {username, green_days, logged_days, total})
+      sorted by green_days desc, then green_ratio desc, then total desc
+    """
+    pnl_totals: dict = {}
+    consistency: dict = {}
+
+    for e in entries:
+        uid      = e["user_id"]
+        username = e["username"]
+        amount   = e["amount"]
+        # Extract calendar date from timestamp or 'day' field
+        ts = e.get("timestamp", "")
+        try:
+            day_key = ts[:10]  # "YYYY-MM-DD"
+        except Exception:
+            day_key = e.get("day", "unknown")
+
+        # PnL totals
+        if uid not in pnl_totals:
+            pnl_totals[uid] = {"username": username, "total": 0.0}
+        pnl_totals[uid]["total"] += amount
+
+        # Consistency: per-day tracking
+        if uid not in consistency:
+            consistency[uid] = {"username": username, "green_days": set(), "all_days": set(), "total": 0.0}
+        consistency[uid]["all_days"].add(day_key)
+        if amount > 0:
+            consistency[uid]["green_days"].add(day_key)
+        consistency[uid]["total"] += amount
+
+    pnl_ranked = sorted(pnl_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+
+    # Flatten sets to counts for sorting
+    con_list = [
+        (uid, {
+            "username":    v["username"],
+            "green_days":  len(v["green_days"]),
+            "logged_days": len(v["all_days"]),
+            "total":       v["total"],
+            "ratio":       len(v["green_days"]) / len(v["all_days"]) if v["all_days"] else 0.0,
+        })
+        for uid, v in consistency.items()
+    ]
+    con_ranked = sorted(
+        con_list,
+        key=lambda x: (x[1]["green_days"], x[1]["ratio"], x[1]["total"]),
+        reverse=True,
+    )
+
+    return pnl_ranked, con_ranked, len(pnl_totals)
+
+
+@_slash_tree.command(name="scoreboard", description="Live kitchen scoreboard — PnL + consistency rankings")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_scoreboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    data    = _pnl_load()
+    entries = data.get("entries", [])
+
+    if not entries:
+        await interaction.followup.send(
+            "Scoreboard's empty — be the first. Log a trade with /pnl. 🍜"
+        )
+        return
+
+    pnl_ranked, con_ranked, total_traders = _build_scoreboard_data(entries)
+    week_start = data.get("week_start", str(_date.today()))
+    medals = ["🥇", "🥈", "🥉"]
+
+    # ── PnL section ──
+    pnl_lines = ["💰 **TOP PNL (this week)**"]
+    for i, (uid, v) in enumerate(pnl_ranked[:5]):
+        medal = medals[i] if i < 3 else f"   {i + 1}."
+        s = "+" if v["total"] >= 0 else ""
+        pnl_lines.append(f"{medal} @{v['username']}    {s}${v['total']:,.0f}")
+
+    # ── Consistency section ──
+    con_lines = ["🔥 **MOST CONSISTENT (this week)**"]
+    for i, (uid, v) in enumerate(con_ranked[:3]):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        con_lines.append(
+            f"{medal} @{v['username']}    {v['green_days']} green days / {v['logged_days']} logged"
+        )
+
+    # ── Crown holder ──
+    guild = interaction.guild
+    crown_role = discord.utils.get(guild.roles, name=_TOP_TRADER_ROLE_NAME) if guild else None
+    crown_holder = None
+    if crown_role and guild:
+        holders = [m for m in guild.members if crown_role in m.roles]
+        crown_holder = holders[0].display_name if holders else None
+
+    sep = "━━━━━━━━━━━━━━━━━━━━━━━"
+    body = "\n".join([
+        f"🏆 **THE KITCHEN SCOREBOARD — week of {week_start}**",
+        sep,
+        *pnl_lines,
+        sep,
+        *con_lines,
+        sep,
+        f"📊 {total_traders} trader{'s' if total_traders != 1 else ''} logged this week",
+        f"👑 Current crown holder: {'@' + crown_holder if crown_holder else 'unclaimed'}",
+        "⏳ Leaderboard locks Friday 4:15 PM ET",
+        sep,
+        "Log yours with /pnl — receipts in #wins. 🍜",
+    ])
+
+    await interaction.followup.send(body)
+    jarvis_log.info(f"SCOREBOARD: /scoreboard used by {interaction.user.display_name}")
+
+
+async def _get_or_create_consistent_role(guild: discord.Guild) -> discord.Role:
+    role = discord.utils.get(guild.roles, name=_CONSISTENT_ROLE_NAME)
+    if role:
+        return role
+    paid_role = discord.utils.get(guild.roles, name="Paid Member")
+    position  = (paid_role.position + 1) if paid_role else 1
+    role = await guild.create_role(
+        name=_CONSISTENT_ROLE_NAME,
+        color=_CONSISTENT_ROLE_COLOR,
+        hoist=True,
+        reason="Most Consistent trader role initialised",
+    )
+    try:
+        await role.edit(position=position)
+    except Exception as exc:
+        jarvis_log.warning(f"CONSISTENT: could not reposition role — {exc}")
+    jarvis_log.info(f"CONSISTENT: Created role '{_CONSISTENT_ROLE_NAME}'")
+    return role
+
+
+# Extend _crown_top_trader to also award 🔥 Most Consistent
+_orig_crown_top_trader = _crown_top_trader
+
+async def _crown_top_trader():
+    """Run original crown logic, then also award the consistency role."""
+    # The original already handles PnL load, leaderboard post, pin, PnL reset.
+    # We need the data BEFORE the reset, so we load it first.
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    data    = _pnl_load()
+    entries = data.get("entries", [])
+
+    # Run original (it resets pnl at the end)
+    await _orig_crown_top_trader()
+
+    if not entries:
+        return  # original already posted "throne empty"
+
+    wins_ch = _ch(guild, _WINS_CHANNEL)
+    if not wins_ch:
+        return
+
+    _, con_ranked, _ = _build_scoreboard_data(entries)
+    if not con_ranked:
+        return
+
+    con_uid, con_data = con_ranked[0]
+    con_role = await _get_or_create_consistent_role(guild)
+
+    # Strip from prior holder
+    for m in guild.members:
+        if con_role in m.roles:
+            try:
+                await m.remove_roles(con_role, reason="Weekly consistency crown transfer")
+            except Exception as exc:
+                jarvis_log.warning(f"CONSISTENT: remove error — {exc}")
+
+    # Award to new winner
+    con_winner = guild.get_member(int(con_uid))
+    if con_winner:
+        try:
+            await con_winner.add_roles(con_role, reason="Most Consistent trader of the week")
+        except Exception as exc:
+            jarvis_log.warning(f"CONSISTENT: assign error — {exc}")
+    else:
+        jarvis_log.warning(f"CONSISTENT: winner UID {con_uid} not in guild")
+
+    mention   = con_winner.mention if con_winner else f"@{con_data['username']}"
+    gd        = con_data["green_days"]
+    ld        = con_data["logged_days"]
+    await wins_ch.send(
+        f"🔥 **MOST CONSISTENT TRADER** 🔥\n"
+        f"{mention} showed up {gd} green day{'s' if gd != 1 else ''} out of {ld} logged.\n"
+        f"Consistency beats luck. Hold it down until next Friday. 🍜"
+    )
+    jarvis_log.info(f"CONSISTENT: Awarded to {con_data['username']} ({gd}/{ld} green days)")
+
+
+# ── Ensure consistency role exists on startup ──
+_prev_on_ready_scoreboard = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_scoreboard()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready scoreboard chain error: {exc}")
+
+    guild = client.get_guild(GUILD_ID)
+    if guild:
+        try:
+            await _get_or_create_consistent_role(guild)
+            jarvis_log.info("SCOREBOARD: 🔥 Most Consistent role verified/created on startup")
+        except Exception as exc:
+            jarvis_log.error(f"SCOREBOARD: role setup error: {exc}")
+    print("[Scoreboard] /scoreboard registered, consistency role ready.")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
