@@ -4327,5 +4327,162 @@ async def on_ready():
     print("[Scoreboard] /scoreboard registered, consistency role ready.")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PAID WALL INFRASTRUCTURE
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Two modes:
+#   OPEN  — Free Member gets same access as Paid Member (current state)
+#   PAID  — Free Member is explicitly denied on all paid channels/categories
+#
+# /paidwall on   → enforce paid wall  (Admin only)
+# /paidwall off  → open mode          (Admin only)
+#
+# Mode persists in paidwall_mode.json and is enforced on every bot startup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PAIDWALL_FILE = "paidwall_mode.json"
+
+# Categories and channel name fragments considered "paid" content
+_PAID_CATEGORY_NAMES = {
+    "🔒 paid alerts", "paid alerts", "paid", "premium", "vip",
+    "💰 live trading", "💰 live trading 💰",
+}
+_PAID_CHANNEL_NAMES = {"long-term-plays", "marky-alerts", "live-calls", "watchlist"}
+
+
+def _paidwall_load() -> str:
+    """Return 'open' or 'paid'. Defaults to 'open'."""
+    try:
+        with open(_PAIDWALL_FILE) as f:
+            return _json.load(f).get("mode", "open")
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return "open"
+
+
+def _paidwall_save(mode: str):
+    try:
+        with open(_PAIDWALL_FILE, "w") as f:
+            _json.dump({"mode": mode}, f)
+    except Exception as exc:
+        jarvis_log.error(f"PAIDWALL: save error — {exc}")
+
+
+def _is_paid_channel(ch) -> bool:
+    """Return True if a channel belongs to a paid category or is a known paid channel."""
+    if ch.category and ch.category.name.lower() in _PAID_CATEGORY_NAMES:
+        return True
+    if ch.name.lower() in _PAID_CHANNEL_NAMES:
+        return True
+    return False
+
+
+async def _apply_paidwall(guild: discord.Guild, mode: str):
+    """
+    Iterate every channel and set Free Member overwrite:
+      mode='open' → Free Member: view_channel=True, send_messages=True  (same as Paid)
+      mode='paid' → Free Member: view_channel=False (explicit deny)
+    """
+    free_role = discord.utils.get(guild.roles, name=FREE_MEMBER_ROLE)
+    if not free_role:
+        jarvis_log.error("PAIDWALL: Free Member role not found — cannot apply mode")
+        return
+
+    if mode == "open":
+        overwrite = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    else:
+        overwrite = discord.PermissionOverwrite(view_channel=False)
+
+    changed = 0
+    for ch in guild.channels:
+        if not _is_paid_channel(ch):
+            continue
+        if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel)):
+            continue
+        try:
+            await ch.set_permissions(free_role, overwrite=overwrite,
+                                     reason=f"Paid wall set to {mode.upper()}")
+            changed += 1
+            jarvis_log.info(f"PAIDWALL: #{ch.name} → Free Member {mode}")
+        except Exception as exc:
+            jarvis_log.warning(f"PAIDWALL: Could not update #{ch.name}: {exc}")
+
+    _paidwall_save(mode)
+    jarvis_log.info(f"PAIDWALL: Mode set to {mode.upper()} — {changed} channels updated")
+    return changed
+
+
+@_slash_tree.command(name="paidwall", description="Toggle paid wall — Admin only")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(mode="'on' to enforce paid wall, 'off' for open access")
+async def _cmd_paidwall(interaction: discord.Interaction, mode: str):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    mode = mode.strip().lower()
+    if mode not in ("on", "off"):
+        await interaction.response.send_message(
+            "❌ Use `/paidwall on` or `/paidwall off`.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    wall_mode = "paid" if mode == "on" else "open"
+    changed   = await _apply_paidwall(interaction.guild, wall_mode)
+
+    if wall_mode == "paid":
+        summary = (
+            f"🔒 **Paid wall is ON** — {changed} paid channels locked.\n"
+            f"Free Members can no longer see paid content.\n"
+            f"To reopen: `/paidwall off`"
+        )
+    else:
+        summary = (
+            f"🔓 **Paid wall is OFF** — {changed} paid channels opened.\n"
+            f"Free Members now see everything (open mode).\n"
+            f"To lock: `/paidwall on`"
+        )
+
+    await interaction.followup.send(summary, ephemeral=True)
+
+    # Also log to #bot-logs so there's a record
+    try:
+        log_ch = discord.utils.get(interaction.guild.text_channels, name="bot-logs")
+        if log_ch:
+            emoji = "🔒" if wall_mode == "paid" else "🔓"
+            await log_ch.send(
+                f"{emoji} **Paid wall changed to `{wall_mode.upper()}`** by "
+                f"{interaction.user.mention} — {changed} channels updated."
+            )
+    except Exception:
+        pass
+
+    jarvis_log.info(
+        f"PAIDWALL: {interaction.user.display_name} set mode to {wall_mode.upper()}"
+    )
+
+
+# Enforce stored mode on startup
+_prev_on_ready_paidwall = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_paidwall()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready paidwall chain error: {exc}")
+
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    stored_mode = _paidwall_load()
+    jarvis_log.info(f"PAIDWALL: Startup — enforcing stored mode: {stored_mode.upper()}")
+    await _apply_paidwall(guild, stored_mode)
+    print(f"[PaidWall] Mode on startup: {stored_mode.upper()} — permissions enforced.")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
