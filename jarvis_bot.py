@@ -3147,10 +3147,10 @@ async def on_ready():
 
     _schedule.every(1).hours.do(_dm_job).tag("content")
 
-    # Friday 4:15 PM ET PnL leaderboard
+    # Friday 5:00 PM ET PnL leaderboard
     def _pnl_job():
         now = datetime.now(_ET)
-        if now.weekday() != 4 or now.hour != 16 or now.minute != 15:
+        if now.weekday() != 4 or now.hour != 17 or now.minute != 0:
             return
         key = f"pnl_lb_{now.date()}"
         if _last_fired.get(key):
@@ -3165,7 +3165,7 @@ async def on_ready():
         "✅ Feature 1  — Live market context (SPY/QQQ/VIX) injected into all AI posts",
         "✅ Feature 2  — /trade slash command → #live-calls alert + thread",
         "✅ Feature 3  — /watchlist slash command → #watchlist embed",
-        "✅ Feature 4  — /pnl slash command + Friday 4:15 PM leaderboard",
+        "✅ Feature 4  — /pnl slash command + Friday 5:00 PM leaderboard",
         "✅ Feature 5  — TradingView webhook server on port 8080",
         "✅ Feature 6  — 3-DM welcome sequence (DM1 immediate, DM2@24h, DM3@48h)",
         "✅ Feature 7  — Voice channel announcements for co-founders",
@@ -3715,10 +3715,10 @@ async def on_ready():
     # (schedule the crown job; the plain leaderboard job still exists but
     #  _crown_top_trader does everything _post_pnl_leaderboard did + more)
     import schedule as _sched_b3
-    _sched_b3.every().friday.at("16:15").do(
+    _sched_b3.every().friday.at("17:00").do(
         lambda: asyncio.run_coroutine_threadsafe(_crown_top_trader(), _bot_loop)
     )
-    jarvis_log.info("BUILD3: Crown leaderboard job scheduled — Fridays 4:15 PM ET")
+    jarvis_log.info("BUILD3: Crown leaderboard job scheduled — Fridays 5:00 PM ET")
 
     # ── Post Build 3 announcement to #general-chat ──
     general = discord.utils.get(guild.text_channels, name="general-chat")
@@ -3733,7 +3733,7 @@ async def on_ready():
             "How to compete:\n"
             "📝 Log your trades all week with /pnl\n"
             "📸 Receipts in #wins make it official\n"
-            "🏆 Friday 4:15 PM — the leaderboard drops and the crown moves\n\n"
+            "🏆 Friday 5:00 PM — the leaderboard drops and the crown moves\n\n"
             "One rule: the crown must be defended every week.\n\n"
             "🎙️ **ALSO NEW: SOUP KITCHEN LIVE**\n"
             "A real stage for live trading sessions — streams, screen shares,\n"
@@ -4218,7 +4218,7 @@ async def _cmd_scoreboard(interaction: discord.Interaction):
         sep,
         f"📊 {total_traders} trader{'s' if total_traders != 1 else ''} logged this week",
         f"👑 Current crown holder: {'@' + crown_holder if crown_holder else 'unclaimed'}",
-        "⏳ Leaderboard locks Friday 4:15 PM ET",
+        "⏳ Leaderboard locks Friday 5:00 PM ET",
         sep,
         "Log yours with /pnl — receipts in #wins. 🍜",
     ])
