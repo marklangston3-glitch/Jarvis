@@ -23,7 +23,7 @@ import yfinance as yf
 
 ET = ZoneInfo("America/New_York")
 
-DATA_DIR  = os.getenv("DATA_DIR", ".")
+DATA_DIR  = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
@@ -4573,6 +4573,7 @@ _GIVEAWAY_RESULTS_FILE = os.path.join(DATA_DIR, "giveaway_results.json")
 
 # In-memory invite cache: {invite_code: use_count}
 _invite_cache: dict = {}
+_giveaway_join_lock = asyncio.Lock()
 
 # Per-member invite codes we created: {member_id: invite_code}
 _member_invite_codes: dict = {}
@@ -4647,21 +4648,22 @@ async def on_member_join(member: discord.Member):
     if member.guild.id != GUILD_ID:
         return
 
-    # Detect which invite was used BEFORE refreshing the cache
-    used_invite = await _detect_inviter(member.guild)
-    await _refresh_invite_cache(member.guild)   # update cache for next join
+    async with _giveaway_join_lock:
+        # Detect which invite was used BEFORE refreshing the cache
+        used_invite = await _detect_inviter(member.guild)
+        await _refresh_invite_cache(member.guild)   # update cache for next join
 
-    if used_invite and used_invite.inviter and used_invite.inviter.id != member.id:
-        inviter_id = str(used_invite.inviter.id)
-        jarvis_log.info(
-            f"GIVEAWAY: {member.display_name} joined via invite by "
-            f"{used_invite.inviter.display_name} (code: {used_invite.code})"
-        )
-        # Store pending — only counted once they verify
-        refs = _ref_load()
-        pending = refs.setdefault("_pending", {})
-        pending[str(member.id)] = inviter_id
-        _ref_save(refs)
+        if used_invite and used_invite.inviter and used_invite.inviter.id != member.id:
+            inviter_id = str(used_invite.inviter.id)
+            jarvis_log.info(
+                f"GIVEAWAY: {member.display_name} joined via invite by "
+                f"{used_invite.inviter.display_name} (code: {used_invite.code})"
+            )
+            # Store pending — only counted once they verify
+            refs = _ref_load()
+            pending = refs.setdefault("_pending", {})
+            pending[str(member.id)] = inviter_id
+            _ref_save(refs)
 
 
 # ─── Verification hook — count only verified members ─────────────────────────
@@ -5048,6 +5050,179 @@ async def on_ready():
     await _refresh_invite_cache(guild)
     jarvis_log.info(f"GIVEAWAY: Invite cache loaded — {len(_invite_cache)} active invites")
     print(f"[Giveaway] Invite cache ready — {len(_invite_cache)} invites tracked.")
+
+
+# ─── /giveaway-progress ──────────────────────────────────────────────────────
+@_slash_tree.command(
+    name="giveaway-progress",
+    description="See everyone's giveaway progress (Admin only)",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_giveaway_progress(interaction: discord.Interaction):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    giveaway = _giveaway_load()
+    needed   = giveaway.get("required_invites", 3)
+    refs     = _ref_load()
+    guild    = interaction.guild
+
+    pending_map = refs.get("_pending", {})
+    pending_per_inviter: dict = {}
+    for _invited_id, inviter_id in pending_map.items():
+        pending_per_inviter[inviter_id] = pending_per_inviter.get(inviter_id, 0) + 1
+
+    inviter_ids = set()
+    for k in refs.keys():
+        if not k.startswith("_"):
+            inviter_ids.add(k)
+    inviter_ids.update(pending_per_inviter.keys())
+
+    rows = []
+    for uid in inviter_ids:
+        confirmed = len(refs.get(uid, [])) if not uid.startswith("_") else 0
+        pending   = pending_per_inviter.get(uid, 0)
+        member    = guild.get_member(int(uid)) if uid.isdigit() else None
+        name      = member.display_name if member else f"(left server · {uid})"
+        rows.append((uid, name, confirmed, pending))
+
+    rows.sort(key=lambda r: (r[2], r[3]), reverse=True)
+
+    if not rows:
+        await interaction.followup.send(
+            "No referral activity yet — nobody has invited anyone. 🍜", ephemeral=True
+        )
+        return
+
+    lines = []
+    qualified_count = 0
+    for i, (uid, name, confirmed, pending) in enumerate(rows, 1):
+        badge = "👑 " if confirmed >= needed else ""
+        if confirmed >= needed:
+            qualified_count += 1
+        pend_txt = f"  (+{pending} unverified)" if pending else ""
+        lines.append(f"`{i:>2}.` {badge}**{name}** — {confirmed}/{needed}{pend_txt}")
+
+    prize = giveaway.get("prize", "the prize")
+    active = giveaway.get("active", False)
+
+    embed = discord.Embed(
+        title="📊 Giveaway Progress — All Members",
+        color=discord.Color.gold(),
+        description="\n".join(lines[:40]),
+    )
+    embed.add_field(
+        name="Summary",
+        value=(
+            f"Prize: **{prize}** {'🟢 active' if active else '🔴 inactive'}\n"
+            f"Threshold: **{needed}** verified invites\n"
+            f"Qualified so far: **{qualified_count}**\n"
+            f"👑 = entered the draw · (+n unverified) = joined but haven't reacted ✅ in #rules yet"
+        ),
+        inline=False,
+    )
+    if len(rows) > 40:
+        embed.set_footer(text=f"Showing top 40 of {len(rows)} inviters.")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    jarvis_log.info(
+        f"GIVEAWAY: Progress viewed by {interaction.user.display_name} "
+        f"({len(rows)} inviters, {qualified_count} qualified)"
+    )
+
+
+# ─── /giveaway-override ──────────────────────────────────────────────────────
+@_slash_tree.command(
+    name="giveaway-override",
+    description="Manually add/remove a referral for a member (Admin only)",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(
+    action="add = credit the referral · remove = take it away",
+    inviter="The member who should get (or lose) the credit",
+    member="The person who joined (the referral being counted)",
+)
+@_app_commands.choices(action=[
+    _app_commands.Choice(name="add", value="add"),
+    _app_commands.Choice(name="remove", value="remove"),
+])
+async def _cmd_giveaway_override(
+    interaction: discord.Interaction,
+    action: _app_commands.Choice[str],
+    inviter: discord.Member,
+    member: discord.Member,
+):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    if inviter.id == member.id:
+        await interaction.response.send_message(
+            "❌ A member can't refer themselves.", ephemeral=True
+        )
+        return
+
+    inviter_id = str(inviter.id)
+    member_id  = str(member.id)
+    act        = action.value
+
+    refs      = _ref_load()
+    confirmed = refs.setdefault(inviter_id, [])
+    pending   = refs.setdefault("_pending", {})
+
+    if act == "add":
+        pending.pop(member_id, None)
+        if member_id in confirmed:
+            await interaction.response.send_message(
+                f"ℹ️ {member.display_name} is already credited to {inviter.display_name} "
+                f"({len(confirmed)}/{_giveaway_load().get('required_invites', 3)}).",
+                ephemeral=True,
+            )
+            refs["_pending"] = pending
+            _ref_save(refs)
+            return
+        confirmed.append(member_id)
+        result = f"✅ Credited **{member.display_name}** to **{inviter.display_name}**."
+    else:
+        if member_id not in confirmed:
+            await interaction.response.send_message(
+                f"ℹ️ {member.display_name} isn't currently credited to {inviter.display_name}.",
+                ephemeral=True,
+            )
+            return
+        confirmed.remove(member_id)
+        result = f"🗑️ Removed **{member.display_name}** from **{inviter.display_name}**."
+
+    refs[inviter_id]  = confirmed
+    refs["_pending"]  = pending
+    _ref_save(refs)
+
+    needed    = _giveaway_load().get("required_invites", 3)
+    new_count = len(confirmed)
+    entered   = " — **now qualified! 👑**" if new_count >= needed else ""
+
+    await interaction.response.send_message(
+        f"{result}\nNew total: **{new_count}/{needed}**{entered}",
+        ephemeral=True,
+    )
+
+    guild  = interaction.guild
+    mod_ch = discord.utils.get(guild.text_channels, name=_MOD_CHANNEL)
+    if mod_ch:
+        await mod_ch.send(
+            f"🛠️ **Giveaway override** by {interaction.user.mention}: "
+            f"`{act}` {member.mention} → {inviter.mention} "
+            f"(now {new_count}/{needed}). 🍜"
+        )
+    jarvis_log.info(
+        f"GIVEAWAY: Override by {interaction.user.display_name} — {act} "
+        f"{member.display_name} for {inviter.display_name} (now {new_count})"
+    )
 
 
 if __name__ == "__main__":
