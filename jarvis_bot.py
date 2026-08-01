@@ -23,6 +23,9 @@ import yfinance as yf
 
 ET = ZoneInfo("America/New_York")
 
+DATA_DIR  = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GUILD_ID = 1513190467796336830
@@ -2183,8 +2186,8 @@ _LIVE_CALLS_CHANNEL  = "live-calls"
 _WATCHLIST_CHANNEL   = "watchlist"
 _WINS_CHANNEL        = "wins"
 _ANNOUNCEMENTS_CHANNEL = "announcements"
-_PNL_FILE   = "pnl_tracker.json"
-_JOINS_FILE = "member_joins.json"
+_PNL_FILE   = os.path.join(DATA_DIR, "pnl_tracker.json")
+_JOINS_FILE = os.path.join(DATA_DIR, "member_joins.json")
 
 _MILESTONES_ALL  = {50, 100, 250, 500, 1000}
 _milestones_hit: set = set()
@@ -4415,7 +4418,7 @@ async def on_ready():
 # Mode persists in paidwall_mode.json and is enforced on every bot startup.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_PAIDWALL_FILE = "paidwall_mode.json"
+_PAIDWALL_FILE = os.path.join(DATA_DIR, "paidwall_mode.json")
 
 # Categories and channel name fragments considered "paid" content
 _PAID_CATEGORY_NAMES = {
@@ -4564,9 +4567,9 @@ async def on_ready():
 
 import random as _random
 
-_REFERRALS_FILE      = "referrals.json"
-_GIVEAWAY_FILE       = "giveaway.json"
-_GIVEAWAY_RESULTS_FILE = "giveaway_results.json"
+_REFERRALS_FILE        = os.path.join(DATA_DIR, "referrals.json")
+_GIVEAWAY_FILE         = os.path.join(DATA_DIR, "giveaway.json")
+_GIVEAWAY_RESULTS_FILE = os.path.join(DATA_DIR, "giveaway_results.json")
 
 # In-memory invite cache: {invite_code: use_count}
 _invite_cache: dict = {}
