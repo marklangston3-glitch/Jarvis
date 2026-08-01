@@ -4558,5 +4558,494 @@ async def on_ready():
     print(f"[PaidWall] Mode on startup: {stored_mode.upper()} — permissions enforced.")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# REFERRAL-GATED GIVEAWAY SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+import random as _random
+
+_REFERRALS_FILE      = "referrals.json"
+_GIVEAWAY_FILE       = "giveaway.json"
+_GIVEAWAY_RESULTS_FILE = "giveaway_results.json"
+
+# In-memory invite cache: {invite_code: use_count}
+_invite_cache: dict = {}
+
+# Per-member invite codes we created: {member_id: invite_code}
+_member_invite_codes: dict = {}
+
+
+# ─── JSON helpers ────────────────────────────────────────────────────────────
+
+def _ref_load() -> dict:
+    """Load referrals.json → {inviter_id: [invited_user_ids]}"""
+    try:
+        with open(_REFERRALS_FILE) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return {}
+
+def _ref_save(data: dict):
+    with open(_REFERRALS_FILE, "w") as f:
+        _json.dump(data, f, indent=2)
+
+def _giveaway_load() -> dict:
+    try:
+        with open(_GIVEAWAY_FILE) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return {}
+
+def _giveaway_save(data: dict):
+    with open(_GIVEAWAY_FILE, "w") as f:
+        _json.dump(data, f, indent=2)
+
+
+# ─── Invite cache helpers ─────────────────────────────────────────────────────
+
+async def _refresh_invite_cache(guild: discord.Guild):
+    """Snapshot current invite use counts into _invite_cache."""
+    global _invite_cache
+    try:
+        invites = await guild.invites()
+        _invite_cache = {inv.code: inv.uses for inv in invites}
+    except discord.Forbidden:
+        jarvis_log.error("GIVEAWAY: Missing 'Manage Server' permission — cannot read invites")
+
+
+async def _detect_inviter(guild: discord.Guild) -> discord.Invite | None:
+    """
+    Compare current invite counts against cache to find which invite was just used.
+    Returns the Invite object (with .inviter) or None.
+    """
+    try:
+        current_invites = await guild.invites()
+    except discord.Forbidden:
+        return None
+
+    for inv in current_invites:
+        cached = _invite_cache.get(inv.code, 0)
+        if inv.uses > cached:
+            return inv
+    return None
+
+
+# ─── on_member_join chain — detect inviter ───────────────────────────────────
+
+_prev_on_member_join_giveaway = client.on_member_join
+
+@client.event
+async def on_member_join(member: discord.Member):
+    try:
+        await _prev_on_member_join_giveaway(member)
+    except Exception as exc:
+        jarvis_log.error(f"on_member_join giveaway chain error: {exc}")
+
+    if member.guild.id != GUILD_ID:
+        return
+
+    # Detect which invite was used BEFORE refreshing the cache
+    used_invite = await _detect_inviter(member.guild)
+    await _refresh_invite_cache(member.guild)   # update cache for next join
+
+    if used_invite and used_invite.inviter and used_invite.inviter.id != member.id:
+        inviter_id = str(used_invite.inviter.id)
+        jarvis_log.info(
+            f"GIVEAWAY: {member.display_name} joined via invite by "
+            f"{used_invite.inviter.display_name} (code: {used_invite.code})"
+        )
+        # Store pending — only counted once they verify
+        refs = _ref_load()
+        pending = refs.setdefault("_pending", {})
+        pending[str(member.id)] = inviter_id
+        _ref_save(refs)
+
+
+# ─── Verification hook — count only verified members ─────────────────────────
+# Chains on_raw_reaction_add: when someone reacts ✅ on #rules, they get
+# Free Member. At that point we move them from _pending → confirmed.
+
+_prev_on_raw_reaction_add_giveaway = client.on_raw_reaction_add
+
+@client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    try:
+        await _prev_on_raw_reaction_add_giveaway(payload)
+    except Exception as exc:
+        jarvis_log.error(f"on_raw_reaction_add giveaway chain error: {exc}")
+
+    if payload.guild_id != GUILD_ID:
+        return
+    if str(payload.emoji) != VERIFY_EMOJI:
+        return
+    if payload.message_id != verification_message_id:
+        return
+
+    member_id = str(payload.user_id)
+    refs = _ref_load()
+    pending = refs.get("_pending", {})
+
+    if member_id not in pending:
+        return  # didn't come from a tracked invite
+
+    inviter_id = pending.pop(member_id)
+    confirmed  = refs.setdefault(inviter_id, [])
+    if member_id not in confirmed:
+        confirmed.append(member_id)
+        jarvis_log.info(
+            f"GIVEAWAY: Member {member_id} verified — counted for inviter {inviter_id} "
+            f"(total: {len(confirmed)})"
+        )
+
+    refs["_pending"] = pending
+    _ref_save(refs)
+
+    # ── Anti-abuse: flag to #mod-chat if suspicious ──────────────────────────
+    guild = client.get_guild(GUILD_ID)
+    if guild:
+        await _check_invite_abuse(guild, inviter_id, confirmed)
+
+
+async def _check_invite_abuse(guild: discord.Guild, inviter_id: str, confirmed_ids: list):
+    """Flag suspicious invite patterns to #mod-chat for human review."""
+    if len(confirmed_ids) < 3:
+        return  # not worth flagging until there's volume
+
+    # Check timestamps of recent joins (members in guild within last 30 min)
+    recent_cutoff = datetime.now(_ET) - timedelta(minutes=30)
+    recent_count  = 0
+    for uid in confirmed_ids[-5:]:  # check last 5 invitees
+        try:
+            m = guild.get_member(int(uid))
+            if m and m.joined_at and m.joined_at.replace(tzinfo=None) > recent_cutoff.replace(tzinfo=None):
+                recent_count += 1
+        except Exception:
+            pass
+
+    if recent_count >= 3:
+        mod_ch = discord.utils.get(guild.text_channels, name=_MOD_CHANNEL)
+        if mod_ch:
+            inviter = guild.get_member(int(inviter_id))
+            name    = inviter.mention if inviter else f"<@{inviter_id}>"
+            await mod_ch.send(
+                f"⚠️ **Suspicious invite pattern** — {name} had {recent_count} invitees "
+                f"verify within the last 30 minutes ({len(confirmed_ids)} total). "
+                f"Review before the giveaway draw. 🍜"
+            )
+            jarvis_log.warning(
+                f"GIVEAWAY: Abuse flag — inviter {inviter_id} had {recent_count} rapid joins"
+            )
+
+
+# ─── /giveaway-create ────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="giveaway-create", description="Create a referral giveaway (Admin, #mod-chat only)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(
+    prize="What the winner receives",
+    required_invites="Verified invites needed to enter (default 3)",
+    duration_days="How many days the giveaway runs",
+)
+async def _cmd_giveaway_create(
+    interaction: discord.Interaction,
+    prize: str,
+    duration_days: int,
+    required_invites: int = 3,
+):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if interaction.channel.name != _MOD_CHANNEL:
+        await interaction.response.send_message(
+            f"❌ Run this in #{_MOD_CHANNEL}.", ephemeral=True
+        )
+        return
+
+    end_dt   = datetime.now(_ET) + timedelta(days=duration_days)
+    end_str  = end_dt.strftime("%B %d, %Y")
+
+    giveaway = {
+        "prize":            prize,
+        "required_invites": required_invites,
+        "end_date":         end_dt.isoformat(),
+        "end_str":          end_str,
+        "created_by":       str(interaction.user.id),
+        "active":           True,
+    }
+    _giveaway_save(giveaway)
+
+    # Post to #announcements
+    guild = interaction.guild
+    ann_ch = discord.utils.get(guild.text_channels, name="announcements")
+    if not ann_ch:
+        ann_ch = discord.utils.get(guild.text_channels, name="general-chat")
+
+    embed = discord.Embed(
+        title=f"🎁 GIVEAWAY — {prize.upper()} 🎁",
+        color=discord.Color.gold(),
+    )
+    embed.description = (
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"To enter: invite **{required_invites} people** to The Soup Kitchen who verify in.\n\n"
+        "📨 Get your personal invite link with `/myinvite`\n"
+        "📊 Check your progress with `/mygiveaway`\n\n"
+        f"Winner drawn **{end_str}**. 🍜👑"
+    )
+    embed.set_footer(text="Only verified members count. Bring real traders. 🍜")
+
+    if ann_ch:
+        await ann_ch.send(embed=embed)
+
+    await interaction.response.send_message(
+        f"✅ Giveaway created — posted to #{ann_ch.name if ann_ch else 'announcements'}. "
+        f"Ends {end_str}. Need {required_invites} verified invites.",
+        ephemeral=True,
+    )
+    jarvis_log.info(
+        f"GIVEAWAY: Created by {interaction.user.display_name} — "
+        f"prize: {prize}, invites: {required_invites}, days: {duration_days}"
+    )
+
+
+# ─── /myinvite ───────────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="myinvite", description="Get your personal giveaway invite link")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_myinvite(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    guild   = interaction.guild
+    member  = interaction.user
+    mid_str = str(member.id)
+
+    # Check if we already made one for them
+    existing_code = _member_invite_codes.get(mid_str)
+    if existing_code:
+        # Verify it still exists
+        try:
+            invites = await guild.invites()
+            match   = next((i for i in invites if i.code == existing_code), None)
+            if match:
+                inv = match
+            else:
+                existing_code = None
+        except discord.Forbidden:
+            existing_code = None
+
+    if not existing_code:
+        # Create a fresh permanent invite in #general-chat or #rules
+        target_ch = (
+            discord.utils.get(guild.text_channels, name="general-chat")
+            or discord.utils.get(guild.text_channels, name="rules")
+            or guild.text_channels[0]
+        )
+        try:
+            inv = await target_ch.create_invite(
+                max_age=0,        # never expires
+                max_uses=0,       # unlimited uses
+                unique=True,
+                reason=f"Giveaway invite for {member.display_name}",
+            )
+            _member_invite_codes[mid_str] = inv.code
+            # Persist code so it survives Railway restarts
+            refs = _ref_load()
+            refs.setdefault("_invite_codes", {})[mid_str] = inv.code
+            _ref_save(refs)
+            jarvis_log.info(f"GIVEAWAY: Created invite {inv.code} for {member.display_name}")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Jarvis doesn't have permission to create invites. "
+                "Ask an Admin to grant **Create Invite** permission.",
+                ephemeral=True,
+            )
+            return
+
+    giveaway = _giveaway_load()
+    needed   = giveaway.get("required_invites", 3)
+    refs     = _ref_load()
+    my_count = len(refs.get(mid_str, []))
+
+    try:
+        await member.send(
+            f"🎁 **Your personal invite link:**\n"
+            f"https://discord.gg/{inv.code}\n\n"
+            f"Share this link. Every person who joins through it AND verifies "
+            f"(reacts ✅ in #rules) counts toward your giveaway entry.\n\n"
+            f"You've verified **{my_count}/{needed}** invites so far. 🍜"
+        )
+        await interaction.followup.send("✅ Invite link sent to your DMs!", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send(
+            f"✅ Your invite link: **https://discord.gg/{inv.code}**\n"
+            f"(DMs are closed — sharing here instead. Keep it moving. 🍜)",
+            ephemeral=True,
+        )
+
+
+# ─── /mygiveaway ─────────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="mygiveaway", description="Check your giveaway entry progress")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_mygiveaway(interaction: discord.Interaction):
+    giveaway = _giveaway_load()
+    if not giveaway or not giveaway.get("active"):
+        await interaction.response.send_message(
+            "No active giveaway right now. Watch #announcements. 🍜", ephemeral=True
+        )
+        return
+
+    mid_str  = str(interaction.user.id)
+    refs     = _ref_load()
+    my_count = len(refs.get(mid_str, []))
+    needed   = giveaway.get("required_invites", 3)
+    prize    = giveaway.get("prize", "the prize")
+    end_str  = giveaway.get("end_str", "TBD")
+
+    if my_count >= needed:
+        status = "✅ **ENTERED!** You're in the draw. Good luck. 👑"
+    else:
+        remaining = needed - my_count
+        status = f"Invite **{remaining} more** verified member{'s' if remaining != 1 else ''} to enter."
+
+    msg = (
+        f"🎁 **Your giveaway progress**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Prize: **{prize}**\n"
+        f"Verified invites: **{my_count} / {needed}**\n"
+        f"{status}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Draw date: {end_str}\n"
+        f"Get your link: `/myinvite` 🍜"
+    )
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+# ─── /giveaway-draw ──────────────────────────────────────────────────────────
+
+@_slash_tree.command(name="giveaway-draw", description="Draw the giveaway winner (Admin only)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_giveaway_draw(interaction: discord.Interaction):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    giveaway = _giveaway_load()
+    if not giveaway:
+        await interaction.followup.send("❌ No giveaway data found.", ephemeral=True)
+        return
+
+    needed   = giveaway.get("required_invites", 3)
+    prize    = giveaway.get("prize", "the prize")
+    refs     = _ref_load()
+    guild    = interaction.guild
+
+    # Build qualified entrants (hit invite threshold, still in server)
+    qualified = []
+    for uid, invitees in refs.items():
+        if uid.startswith("_"):
+            continue  # skip _pending etc.
+        if len(invitees) >= needed:
+            member = guild.get_member(int(uid))
+            if member:
+                qualified.append({"user_id": uid, "username": member.display_name,
+                                   "invite_count": len(invitees)})
+
+    if not qualified:
+        await interaction.followup.send(
+            f"❌ No qualified entrants yet — nobody has reached {needed} verified invites.",
+            ephemeral=True,
+        )
+        return
+
+    winner    = _random.choice(qualified)
+    winner_m  = guild.get_member(int(winner["user_id"]))
+    winner_mention = winner_m.mention if winner_m else f"@{winner['username']}"
+
+    # Announce in #announcements
+    ann_ch = discord.utils.get(guild.text_channels, name="announcements")
+    if not ann_ch:
+        ann_ch = discord.utils.get(guild.text_channels, name="general-chat")
+
+    if ann_ch:
+        await ann_ch.send(
+            f"🎁 **GIVEAWAY WINNER** 🎁\n\n"
+            f"After {len(qualified)} qualified entrant{'s' if len(qualified) != 1 else ''}, "
+            f"the winner of **{prize}** is…\n\n"
+            f"👑 {winner_mention} 👑\n\n"
+            f"**{winner['invite_count']} verified referrals** — that's how you compete. 🍜"
+        )
+
+    # Log results
+    results = {
+        "prize":      prize,
+        "drawn_at":   datetime.now(_ET).isoformat(),
+        "drawn_by":   interaction.user.display_name,
+        "winner":     winner,
+        "qualified":  qualified,
+        "total_entrants": len(qualified),
+    }
+    with open(_GIVEAWAY_RESULTS_FILE, "w") as f:
+        _json.dump(results, f, indent=2)
+
+    # Mark giveaway inactive
+    giveaway["active"] = False
+    _giveaway_save(giveaway)
+
+    await interaction.followup.send(
+        f"✅ Winner drawn: **{winner['username']}** ({winner['invite_count']} invites). "
+        f"Announced in #{ann_ch.name if ann_ch else 'announcements'}.",
+        ephemeral=True,
+    )
+    jarvis_log.info(
+        f"GIVEAWAY: Draw complete — winner {winner['username']} "
+        f"({winner['invite_count']} invites), {len(qualified)} qualified"
+    )
+
+
+# ─── Startup: cache invites + verify permissions ──────────────────────────────
+
+_prev_on_ready_giveaway = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_giveaway()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready giveaway chain error: {exc}")
+
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    # Check Manage Server permission
+    me = guild.me
+    if me:
+        if me.guild_permissions.manage_guild:
+            jarvis_log.info("GIVEAWAY: ✅ Manage Server permission confirmed")
+        else:
+            jarvis_log.error("GIVEAWAY: ❌ Missing 'Manage Server' permission — invite tracking disabled")
+            print("[Giveaway] ⚠️  Missing 'Manage Server' permission — grant it in Server Settings → Roles → Jarvis")
+
+        if me.guild_permissions.create_instant_invite:
+            jarvis_log.info("GIVEAWAY: ✅ Create Invite permission confirmed")
+        else:
+            jarvis_log.error("GIVEAWAY: ❌ Missing 'Create Invite' permission — /myinvite will fail")
+            print("[Giveaway] ⚠️  Missing 'Create Invite' permission")
+
+    # Load member invite codes from any existing referral data into _member_invite_codes
+    # (we can't recover codes across restarts without storing them, so store them in refs)
+    refs = _ref_load()
+    codes = refs.get("_invite_codes", {})
+    _member_invite_codes.update(codes)
+
+    await _refresh_invite_cache(guild)
+    jarvis_log.info(f"GIVEAWAY: Invite cache loaded — {len(_invite_cache)} active invites")
+    print(f"[Giveaway] Invite cache ready — {len(_invite_cache)} invites tracked.")
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
