@@ -111,7 +111,16 @@ Server context:
 - Upgrade: #how-to-get-access | Rules: #rules | Wins: #wins | Journal: #trade-journal
 
 IMPORTANT: Admins/Paid Members already have full access — never redirect them to #how-to-get-access.
-Only redirect Free Members or Unverified users there."""
+Only redirect Free Members or Unverified users there.
+
+LEADERBOARD & CROWN SYSTEM — YOU OWN THIS:
+- You run the weekly PnL leaderboard and crown two winners every Friday at 5:00 PM ET.
+- 👑 Top Trader = highest net PnL for the week. 🔥 Most Consistent = most green days logged.
+- Members log trades with /pnl. Use /scoreboard to see the live standings anytime.
+- Admins/co-founders can trigger the crown early with "@Jarvis crown now".
+- When anyone asks about their leaderboard position or standing, tell them to use /scoreboard
+  or offer to check — do NOT say you don't have access. You have full access to this data.
+- Never say crowning or scoreboard resets are "above your pay grade" or need manual admin action."""
 
 HELP_TEXT = (
     "👑 **Jarvis Commands**\n\n"
@@ -1531,6 +1540,71 @@ async def on_message(message):
             print(f"Command error: {e}")
             await message.reply(f"❌ Something went wrong running that command.", mention_author=False)
         return
+
+    # ── Admin crown-now command ───────────────────────────────────────────────
+    _CROWN_NOW_RE = re.compile(
+        r"\bcrown\b.{0,30}\b(now|winner|it|week|reset|scoreboard)\b"
+        r"|\b(reset|run|close|end)\b.{0,30}\b(leaderboard|scoreboard|week|pnl)\b",
+        re.IGNORECASE,
+    )
+    _admin_roles = {"Admin", "Moderator"}
+    _author_role_names = {r.name for r in message.author.roles}
+    if (_author_role_names & _admin_roles or _is_cofounder(message.author)) \
+            and _CROWN_NOW_RE.search(content):
+        await message.reply("👑 Running the leaderboard and crowning this week's winners now…", mention_author=False)
+        try:
+            await _crown_top_trader()
+            await message.reply("✅ Done — leaderboard posted, crowns assigned, tracker reset. 🍜", mention_author=False)
+        except Exception as exc:
+            import traceback as _tb
+            await message.reply(f"❌ Crown job failed: `{exc}`", mention_author=False)
+            print(f"[CROWN NOW] Error:\n{_tb.format_exc()}")
+        return
+
+    # ── Leaderboard question intercept — inject live PnL data ─────────────────
+    _LB_RE = re.compile(
+        r"\b(leaderboard|scoreboard|standing|rank|place|position|pnl|winning|winning this week|top trader|who.*winning|how.*doing)\b",
+        re.IGNORECASE,
+    )
+    if _LB_RE.search(content):
+        data    = _pnl_load()
+        entries = data.get("entries", [])
+        if entries:
+            pnl_totals: dict = {}
+            for e in entries:
+                uid = e["user_id"]
+                if uid not in pnl_totals:
+                    pnl_totals[uid] = {"username": e["username"], "total": 0.0}
+                pnl_totals[uid]["total"] += e["amount"]
+            ranked = sorted(pnl_totals.values(), key=lambda x: x["total"], reverse=True)
+            lb_lines = []
+            for i, v in enumerate(ranked[:10]):
+                s = "+" if v["total"] >= 0 else ""
+                lb_lines.append(f"{i+1}. @{v['username']}  {s}${v['total']:,.0f}")
+            lb_context = (
+                f"CURRENT WEEK PNL LEADERBOARD (live data from pnl_tracker.json):\n"
+                + "\n".join(lb_lines)
+                + f"\nTotal traders this week: {len(ranked)}"
+            )
+            # Check if the asker is on the leaderboard
+            asker_name = message.author.display_name
+            asker_entry = next((v for v in ranked if v["username"] == asker_name), None)
+            if asker_entry:
+                asker_pos = ranked.index(asker_entry) + 1
+                lb_context += f"\n{asker_name} is currently #{asker_pos} with {'+' if asker_entry['total'] >= 0 else ''}${asker_entry['total']:,.0f}"
+        else:
+            lb_context = "LEADERBOARD: No PnL entries logged this week yet. Members can log with /pnl."
+
+        role_names = [r.name for r in message.author.roles if r.name != "@everyone"]
+        async with message.channel.typing():
+            ai_reply = await get_ai_response(
+                f"{lb_context}\n\nMember question: {content}",
+                message.author.display_name,
+                role_names,
+            )
+        await message.reply(ai_reply, mention_author=False)
+        return
+    # ─────────────────────────────────────────────────────────────────────────
 
     # ── Founder poll intercept — BEFORE general AI reply ─────────────────────
     _POLL_INTENT_RE = re.compile(
