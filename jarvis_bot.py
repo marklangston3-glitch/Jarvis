@@ -2701,6 +2701,12 @@ _DM2 = (
     "• #wins — drop your W's here\n"
     "• #trade-journal — log every trade, win or lose\n"
     "• #market-talk — community discussion all day\n\n"
+    "🍜 **The Langston Volatility Capture — our indicator**\n"
+    "It's the edge this whole community is built on. It reads the market in "
+    "real time and tells you exactly when to strike and when to sit.\n"
+    "• Run `/indicator` anywhere in the server for the 2-minute quick guide\n"
+    "• Live signals fire in #markys-alerts\n"
+    "• Want it on your own charts? Check #how-to-get-access\n\n"
     "The best traders in here show up every single day. 🍜"
 )
 _DM3 = (
@@ -5311,6 +5317,91 @@ async def _cmd_giveaway_override(
         f"GIVEAWAY: Override by {interaction.user.display_name} — {act} "
         f"{member.display_name} for {inviter.display_name} (now {new_count})"
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# NEW MEMBER ROLE — auto-assign on join, auto-remove after 7 days
+# ═════════════════════════════════════════════════════════════════════════════
+_NEW_MEMBER_ROLE = "New Member"
+_NEW_MEMBER_DAYS = 7
+
+async def _ensure_new_member_role(guild):
+    role = discord.utils.get(guild.roles, name=_NEW_MEMBER_ROLE)
+    if role is None:
+        try:
+            role = await guild.create_role(
+                name=_NEW_MEMBER_ROLE,
+                mentionable=True,
+                reason="New Member auto-role system",
+            )
+            jarvis_log.info("NEWROLE: created 'New Member' role")
+        except discord.Forbidden:
+            jarvis_log.error("NEWROLE: missing Manage Roles permission")
+            return None
+    return role
+
+_prev_on_member_join_newrole = client.on_member_join
+
+@client.event
+async def on_member_join(member):
+    try:
+        await _prev_on_member_join_newrole(member)
+    except Exception as exc:
+        jarvis_log.error(f"on_member_join newrole chain error: {exc}")
+    if member.guild.id != GUILD_ID:
+        return
+    role = await _ensure_new_member_role(member.guild)
+    if role:
+        try:
+            await member.add_roles(role, reason="Joined — tagged New Member for 7 days")
+        except discord.Forbidden:
+            jarvis_log.error("NEWROLE: cannot add role (check Manage Roles + role position)")
+
+@tasks.loop(hours=1)
+async def _sweep_new_member_role():
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    role = discord.utils.get(guild.roles, name=_NEW_MEMBER_ROLE)
+    if not role:
+        return
+    cutoff = datetime.now(_ET) - timedelta(days=_NEW_MEMBER_DAYS)
+    for member in list(role.members):
+        if member.joined_at and member.joined_at < cutoff:
+            try:
+                await member.remove_roles(role, reason="New Member — 7 days elapsed")
+                jarvis_log.info(f"NEWROLE: removed from {member.display_name}")
+            except discord.Forbidden:
+                pass
+
+@_sweep_new_member_role.before_loop
+async def _before_sweep_new_member_role():
+    await client.wait_until_ready()
+
+_prev_on_ready_newrole = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_newrole()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready newrole chain error: {exc}")
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    role = await _ensure_new_member_role(guild)
+    if role:
+        cutoff = datetime.now(_ET) - timedelta(days=_NEW_MEMBER_DAYS)
+        for member in guild.members:
+            if member.bot:
+                continue
+            if member.joined_at and member.joined_at >= cutoff and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason="Backfill: joined within 7 days")
+                except discord.Forbidden:
+                    pass
+    if not _sweep_new_member_role.is_running():
+        _sweep_new_member_role.start()
 
 
 if __name__ == "__main__":
