@@ -4684,8 +4684,68 @@ def _ref_load() -> dict:
         return {}
 
 def _ref_save(data: dict):
-    with open(_REFERRALS_FILE, "w") as f:
-        _json.dump(data, f, indent=2)
+    tmp = _REFERRALS_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            _json.dump(data, f, indent=2)
+        os.replace(tmp, _REFERRALS_FILE)
+    except Exception as exc:
+        jarvis_log.error(f"GIVEAWAY: _ref_save failed writing to {_REFERRALS_FILE}: {exc}")
+
+
+# ─── Discord-backed referral snapshot (survives Railway redeploys) ────────────
+_REF_SNAPSHOT_PREFIX = "🔒 REFERRAL_SNAPSHOT:"
+_ref_snapshot_msg_id: int | None = None
+
+
+async def _ref_backup_to_discord(guild: discord.Guild, data: dict):
+    """Post/update a referral snapshot in #bot-logs so data survives redeploys."""
+    global _ref_snapshot_msg_id
+    bot_logs = discord.utils.get(guild.text_channels, name="bot-logs")
+    if not bot_logs:
+        return
+    raw = _json.dumps(data, separators=(",", ":"))
+    if len(raw) > 1800:
+        jarvis_log.warning(f"GIVEAWAY: Referral snapshot is {len(raw)} chars — may truncate")
+    content = f"{_REF_SNAPSHOT_PREFIX}\n```json\n{raw[:1850]}\n```"
+    try:
+        if _ref_snapshot_msg_id:
+            try:
+                msg = await bot_logs.fetch_message(_ref_snapshot_msg_id)
+                await msg.edit(content=content)
+                return
+            except discord.NotFound:
+                _ref_snapshot_msg_id = None
+        async for msg in bot_logs.history(limit=200):
+            if msg.author.id == guild.me.id and msg.content.startswith(_REF_SNAPSHOT_PREFIX):
+                _ref_snapshot_msg_id = msg.id
+                await msg.edit(content=content)
+                return
+        msg = await bot_logs.send(content)
+        _ref_snapshot_msg_id = msg.id
+        jarvis_log.info(f"GIVEAWAY: Referral snapshot posted to #bot-logs (msg {msg.id})")
+    except Exception as exc:
+        jarvis_log.error(f"GIVEAWAY: Could not backup referrals to Discord: {exc}")
+
+
+async def _ref_restore_from_discord(guild: discord.Guild) -> dict | None:
+    """Scan #bot-logs for the most recent referral snapshot, return its data or None."""
+    global _ref_snapshot_msg_id
+    bot_logs = discord.utils.get(guild.text_channels, name="bot-logs")
+    if not bot_logs:
+        return None
+    try:
+        async for msg in bot_logs.history(limit=300):
+            if msg.author.id == guild.me.id and msg.content.startswith(_REF_SNAPSHOT_PREFIX):
+                _ref_snapshot_msg_id = msg.id
+                text = msg.content
+                start = text.find("```json\n") + 8
+                end   = text.rfind("\n```")
+                if start > 8 and end > start:
+                    return _json.loads(text[start:end])
+    except Exception as exc:
+        jarvis_log.error(f"GIVEAWAY: Could not restore referrals from Discord: {exc}")
+    return None
 
 def _giveaway_load() -> dict:
     try:
@@ -4758,6 +4818,7 @@ async def on_member_join(member: discord.Member):
             pending = refs.setdefault("_pending", {})
             pending[str(member.id)] = inviter_id
             _ref_save(refs)
+            asyncio.ensure_future(_ref_backup_to_discord(member.guild, refs))
 
 
 # ─── Verification hook — count only verified members ─────────────────────────
@@ -4801,6 +4862,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     # ── Anti-abuse: flag to #mod-chat if suspicious ──────────────────────────
     guild = client.get_guild(GUILD_ID)
+    if guild:
+        asyncio.ensure_future(_ref_backup_to_discord(guild, refs))
     if guild:
         await _check_invite_abuse(guild, inviter_id, confirmed)
 
@@ -5135,9 +5198,23 @@ async def on_ready():
             jarvis_log.error("GIVEAWAY: ❌ Missing 'Create Invite' permission — /myinvite will fail")
             print("[Giveaway] ⚠️  Missing 'Create Invite' permission")
 
-    # Load member invite codes from any existing referral data into _member_invite_codes
-    # (we can't recover codes across restarts without storing them, so store them in refs)
+    # Load referral data — restore from Discord snapshot if file is missing
     refs = _ref_load()
+    confirmed_count = len([k for k in refs if not k.startswith("_")])
+    if not refs or confirmed_count == 0:
+        jarvis_log.warning("GIVEAWAY: referrals.json missing or empty — scanning #bot-logs for snapshot")
+        restored = await _ref_restore_from_discord(guild)
+        if restored:
+            _ref_save(restored)
+            refs = restored
+            n = len([k for k in refs if not k.startswith("_")])
+            jarvis_log.info(f"GIVEAWAY: Restored {n} inviter(s) from Discord snapshot")
+        else:
+            jarvis_log.error("GIVEAWAY: No Discord snapshot found — referral data may be lost")
+    else:
+        jarvis_log.info(f"GIVEAWAY: Loaded {confirmed_count} inviter(s) from referrals.json")
+        asyncio.ensure_future(_ref_backup_to_discord(guild, refs))  # keep snapshot current
+
     codes = refs.get("_invite_codes", {})
     _member_invite_codes.update(codes)
 
@@ -5229,6 +5306,51 @@ async def _cmd_giveaway_progress(interaction: discord.Interaction):
     )
 
 
+# ─── /giveaway-debug ─────────────────────────────────────────────────────────
+@_slash_tree.command(
+    name="giveaway-debug",
+    description="Show raw giveaway data state and file health (Admin only)",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_giveaway_debug(interaction: discord.Interaction):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    file_exists = os.path.isfile(_REFERRALS_FILE)
+    file_size   = os.path.getsize(_REFERRALS_FILE) if file_exists else 0
+    refs        = _ref_load()
+    giveaway    = _giveaway_load()
+
+    confirmed_inviters = {k: v for k, v in refs.items() if not k.startswith("_")}
+    pending_map        = refs.get("_pending", {})
+    invite_codes       = refs.get("_invite_codes", {})
+
+    guild = interaction.guild
+    lines = [
+        f"**File:** `{_REFERRALS_FILE}`",
+        f"**Exists:** {'✅ yes' if file_exists else '❌ NO'} ({file_size} bytes)",
+        f"**Snapshot msg ID:** `{_ref_snapshot_msg_id}`",
+        f"**Giveaway active:** {giveaway.get('active', False)} | needed: {giveaway.get('required_invites', 3)} | prize: {giveaway.get('prize', 'N/A')}",
+        f"**Confirmed inviters:** {len(confirmed_inviters)}",
+        f"**Pending (unverified):** {len(pending_map)}",
+        f"**Stored invite codes:** {len(invite_codes)}",
+        "",
+        "**Confirmed breakdown:**",
+    ]
+    for uid, ids in list(confirmed_inviters.items())[:15]:
+        m = guild.get_member(int(uid)) if uid.isdigit() else None
+        name = m.display_name if m else f"(left · {uid})"
+        lines.append(f"  • {name} → {len(ids)} confirmed")
+    if len(confirmed_inviters) > 15:
+        lines.append(f"  … and {len(confirmed_inviters) - 15} more")
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 # ─── /giveaway-override ──────────────────────────────────────────────────────
 @_slash_tree.command(
     name="giveaway-override",
@@ -5279,6 +5401,7 @@ async def _cmd_giveaway_override(
             )
             refs["_pending"] = pending
             _ref_save(refs)
+            asyncio.ensure_future(_ref_backup_to_discord(interaction.guild, refs))
             return
         confirmed.append(member_id)
         result = f"✅ Credited **{member.display_name}** to **{inviter.display_name}**."
@@ -5295,6 +5418,7 @@ async def _cmd_giveaway_override(
     refs[inviter_id]  = confirmed
     refs["_pending"]  = pending
     _ref_save(refs)
+    asyncio.ensure_future(_ref_backup_to_discord(interaction.guild, refs))
 
     needed    = _giveaway_load().get("required_invites", 3)
     new_count = len(confirmed)
