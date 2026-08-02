@@ -1223,13 +1223,22 @@ async def before_news_scanner():
 
 
 async def find_verification_message(guild):
-    for channel in guild.text_channels:
-        if channel.name == RULES_CHANNEL_NAME:
-            async for message in channel.history(limit=50):
-                if message.author == client.user:
-                    for reaction in message.reactions:
-                        if str(reaction.emoji) == VERIFY_EMOJI:
-                            return message.id
+    rules_ch = discord.utils.get(guild.text_channels, name=RULES_CHANNEL_NAME)
+    if rules_ch is None:
+        jarvis_log.error(f"find_verification_message: no channel named '{RULES_CHANNEL_NAME}' found")
+        return None
+    async for message in rules_ch.history(limit=100):
+        for reaction in message.reactions:
+            if str(reaction.emoji) == VERIFY_EMOJI:
+                jarvis_log.info(
+                    f"find_verification_message: found ✅ on message {message.id} "
+                    f"by {message.author} in #{rules_ch.name}"
+                )
+                return message.id
+    jarvis_log.error(
+        f"find_verification_message: scanned 100 messages in #{rules_ch.name} "
+        f"— no message with a ✅ reaction found"
+    )
     return None
 
 
@@ -1413,6 +1422,13 @@ async def on_ready():
     except Exception as e:
         print(f"Channel auto-creation error (may need Manage Channels permission): {e}")
     verification_message_id = await find_verification_message(guild)
+    if verification_message_id:
+        jarvis_log.info(f"Verification ready: watching message id {verification_message_id} for ✅ reactions")
+    else:
+        jarvis_log.error(
+            "VERIFICATION BROKEN on startup: could not find a message with ✅ reaction in #rules. "
+            "Post a rules message and add a ✅ reaction to it, then redeploy."
+        )
     print(f"Watching verification message id: {verification_message_id}")
     print(f"AI responses: {'enabled' if claude_client else 'disabled (no ANTHROPIC_API_KEY)'}")
     if not daily_market_prep.is_running():
@@ -1445,27 +1461,60 @@ async def on_member_join(member):
 async def on_raw_reaction_add(payload):
     if payload.guild_id != GUILD_ID:
         return
-    if verification_message_id is None or payload.message_id != verification_message_id:
-        return
     if str(payload.emoji) != VERIFY_EMOJI:
         return
     if payload.member is None or payload.member.bot:
         return
 
+    if verification_message_id is None:
+        jarvis_log.error(
+            f"on_raw_reaction_add: verification_message_id is None — "
+            f"could not verify {payload.member} (id={payload.user_id}). "
+            f"Reacted on message {payload.message_id} in channel {payload.channel_id}."
+        )
+        return
+    if payload.message_id != verification_message_id:
+        return
+
     guild = client.get_guild(GUILD_ID)
     role = discord.utils.get(guild.roles, name=FREE_MEMBER_ROLE)
     if role is None:
-        print(f"Role '{FREE_MEMBER_ROLE}' not found")
+        jarvis_log.error(
+            f"on_raw_reaction_add: role '{FREE_MEMBER_ROLE}' does not exist in guild — "
+            f"cannot verify {payload.member}. Create a role named exactly '{FREE_MEMBER_ROLE}'."
+        )
+        await _alert_bot_logs(
+            f"Verification broken: role '{FREE_MEMBER_ROLE}' not found. "
+            f"Create it in Server Settings → Roles."
+        )
         return
 
-    await payload.member.add_roles(role)
-    print(f"Assigned {FREE_MEMBER_ROLE} role to {payload.member}")
+    try:
+        await payload.member.add_roles(role)
+        jarvis_log.info(f"Assigned '{FREE_MEMBER_ROLE}' to {payload.member} (id={payload.member.id})")
+    except discord.Forbidden:
+        jarvis_log.error(
+            f"on_raw_reaction_add: Forbidden adding role '{FREE_MEMBER_ROLE}' to {payload.member}. "
+            f"Bot lacks Manage Roles permission or the role is above the bot in hierarchy."
+        )
+        await _alert_bot_logs(
+            f"Verification broken: bot cannot assign '{FREE_MEMBER_ROLE}' to {payload.member}. "
+            f"Check bot's Manage Roles permission and role hierarchy."
+        )
+        return
+    except Exception as exc:
+        import traceback as _tb
+        jarvis_log.error(
+            f"on_raw_reaction_add: unexpected error assigning role to {payload.member}: {exc}\n"
+            + _tb.format_exc()
+        )
+        return
 
     try:
         await payload.member.send(WELCOME_DM)
-        print(f"Sent welcome DM to {payload.member}")
+        jarvis_log.info(f"Sent welcome DM to {payload.member}")
     except discord.Forbidden:
-        print(f"Could not DM {payload.member} (DMs closed)")
+        jarvis_log.info(f"Could not DM {payload.member} (DMs closed)")
 
 
 @client.event
