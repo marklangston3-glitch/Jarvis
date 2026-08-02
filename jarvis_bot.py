@@ -1408,6 +1408,44 @@ async def auto_create_channels(guild):
         print("Created #long-term-plays (paid only)")
 
 
+async def _backfill_verified_members(guild, message_id):
+    """Assign Free Member to anyone who already reacted ✅ on the rules message but never got the role."""
+    rules_ch = discord.utils.get(guild.text_channels, name=RULES_CHANNEL_NAME)
+    if rules_ch is None:
+        return
+    free_member_role = discord.utils.get(guild.roles, name=FREE_MEMBER_ROLE)
+    if free_member_role is None:
+        jarvis_log.error(f"_backfill_verified_members: role '{FREE_MEMBER_ROLE}' not found, skipping backfill")
+        return
+    try:
+        msg = await rules_ch.fetch_message(message_id)
+    except Exception as exc:
+        jarvis_log.error(f"_backfill_verified_members: could not fetch message {message_id}: {exc}")
+        return
+
+    backfilled = 0
+    for reaction in msg.reactions:
+        if str(reaction.emoji) != VERIFY_EMOJI:
+            continue
+        async for user in reaction.users():
+            if user.bot:
+                continue
+            member = guild.get_member(user.id)
+            if member is None:
+                continue
+            if free_member_role not in member.roles:
+                try:
+                    await member.add_roles(free_member_role)
+                    jarvis_log.info(f"Backfill: granted '{FREE_MEMBER_ROLE}' to {member} (id={member.id})")
+                    backfilled += 1
+                except Exception as exc:
+                    jarvis_log.error(f"Backfill: failed to add role to {member}: {exc}")
+    if backfilled:
+        jarvis_log.info(f"Backfill complete: granted '{FREE_MEMBER_ROLE}' to {backfilled} member(s)")
+    else:
+        jarvis_log.info("Backfill complete: all ✅ reactors already have Free Member role")
+
+
 @client.event
 async def on_ready():
     global verification_message_id
@@ -1424,6 +1462,7 @@ async def on_ready():
     verification_message_id = await find_verification_message(guild)
     if verification_message_id:
         jarvis_log.info(f"Verification ready: watching message id {verification_message_id} for ✅ reactions")
+        await _backfill_verified_members(guild, verification_message_id)
     else:
         jarvis_log.error(
             "VERIFICATION BROKEN on startup: could not find a message with ✅ reaction in #rules. "
