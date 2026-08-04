@@ -39,7 +39,8 @@ UNVERIFIED_ROLE = "Unverified"
 # ─── JARVIS HUB SUB-CHANNELS ───
 JARVIS_ALERTS_CHANNEL = "jarvis-alerts"
 JARVIS_DATA_CHANNEL = "jarvis-market-data"
-JARVIS_CALENDAR_CHANNEL = "jarvis-calendar"
+JARVIS_CALENDAR_CHANNEL_ID = 1513227102839771310  # morning report channel
+JARVIS_CALENDAR_CHANNEL = "jarvis-calendar"       # kept for legacy name refs only
 
 # ─── COMMAND → SUB-CHANNEL ROUTING ───
 COMMAND_ROUTING = {
@@ -57,11 +58,11 @@ COMMAND_ROUTING = {
     "coin": JARVIS_DATA_CHANNEL,
     "fear": JARVIS_DATA_CHANNEL,
     "greed": JARVIS_DATA_CHANNEL,
-    "earnings": JARVIS_CALENDAR_CHANNEL,
+    "earnings": JARVIS_CALENDAR_CHANNEL_ID,
     "news": JARVIS_ALERTS_CHANNEL,
-    "calendar": JARVIS_CALENDAR_CHANNEL,
-    "econ": JARVIS_CALENDAR_CHANNEL,
-    "prep": JARVIS_CALENDAR_CHANNEL,
+    "calendar": JARVIS_CALENDAR_CHANNEL_ID,
+    "econ": JARVIS_CALENDAR_CHANNEL_ID,
+    "prep": JARVIS_CALENDAR_CHANNEL_ID,
 }
 
 # ─── NEWS SCANNER ───
@@ -108,7 +109,7 @@ Never give specific financial advice ("buy this now"). Frame market views as ana
 
 Server context:
 - Free members: #general-chat, #market-talk, #memes, #daily-levels, #watchlist, #charting
-- Jarvis Hub: #jarvis-alerts (news), #jarvis-market-data (data), #jarvis-calendar (prep/calendar)
+- Jarvis Hub: #jarvis-alerts (news), #jarvis-market-data (data), <#1513227102839771310> (prep/calendar/morning report)
 - Moose Market Milad: #moose-stage, #moose-trade-talk, #moose-analysis
 - Paid: #live-calls, #options-flow, #trade-recaps, #playbook, #recordings, #q-and-a, #long-term-plays
 - Upgrade: #how-to-get-access | Rules: #rules | Wins: #wins | Journal: #trade-journal
@@ -139,7 +140,7 @@ HELP_TEXT = (
     "• `@Jarvis crypto BTC` — crypto price\n"
     "• `@Jarvis fear` — Fear & Greed Index\n"
     "• `@Jarvis market` — market overview (SPY, QQQ, VIX)\n\n"
-    "**📅 Calendar & Prep** → routed to #jarvis-calendar:\n"
+    "**📅 Calendar & Prep** → routed to <#1513227102839771310>:\n"
     "• `@Jarvis earnings AAPL` — next earnings + recent EPS\n"
     "• `@Jarvis calendar` — today's US economic events\n"
     "• `@Jarvis prep` — full morning market prep\n\n"
@@ -178,7 +179,7 @@ STATIC_COMMANDS = {
         "**🤖 Jarvis Hub:**\n"
         "• #jarvis-alerts — breaking news & red folder alerts\n"
         "• #jarvis-market-data — price, technicals, options, levels\n"
-        "• #jarvis-calendar — economic calendar, market prep, earnings\n\n"
+        "• <#1513227102839771310> — economic calendar, market prep, earnings\n\n"
         "**🫎 Moose Market Milad:**\n"
         "• #moose-stage — main stage\n"
         "• #moose-trade-talk — talk through trades live\n"
@@ -1162,11 +1163,11 @@ async def daily_market_prep():
     guild = client.get_guild(GUILD_ID)
     if guild is None:
         return
-    channel = discord.utils.get(guild.text_channels, name=JARVIS_CALENDAR_CHANNEL)
+    channel = client.get_channel(JARVIS_CALENDAR_CHANNEL_ID)
     if channel is None:
         channel = discord.utils.get(guild.text_channels, name=DAILY_CHANNEL_NAME)
     if channel is None:
-        print(f"Channel #{JARVIS_CALENDAR_CHANNEL} not found for daily prep")
+        print(f"Morning report channel (id {JARVIS_CALENDAR_CHANNEL_ID}) not found for daily prep")
         return
     try:
         messages = await asyncio.to_thread(build_market_prep)
@@ -1353,7 +1354,6 @@ async def auto_create_channels(guild):
     jarvis_channels = {
         JARVIS_ALERTS_CHANNEL: "🚨 Breaking financial news & red folder alerts from Jarvis",
         JARVIS_DATA_CHANNEL: "📊 Market data outputs — price, technicals, options, levels, movers",
-        JARVIS_CALENDAR_CHANNEL: "📅 Economic calendar, daily market prep, earnings data",
     }
     for name, topic in jarvis_channels.items():
         if name not in existing:
@@ -1607,10 +1607,15 @@ async def on_message(message):
             msgs = result if isinstance(result, list) else [result]
             msgs = [m[:1997] + "..." if len(m) > 2000 else m for m in msgs]
 
-            target_channel_name = COMMAND_ROUTING.get(cmd_name)
+            _route = COMMAND_ROUTING.get(cmd_name)
             target_channel = None
-            if target_channel_name and message.channel.name != target_channel_name:
-                target_channel = discord.utils.get(message.guild.text_channels, name=target_channel_name)
+            if _route:
+                if isinstance(_route, int):
+                    _ch = client.get_channel(_route)
+                    if _ch and _ch.id != message.channel.id:
+                        target_channel = _ch
+                elif message.channel.name != _route:
+                    target_channel = discord.utils.get(message.guild.text_channels, name=_route)
 
             if target_channel:
                 for i, msg in enumerate(msgs):
@@ -4049,7 +4054,6 @@ async def _ai_generate_poll(topic: str, channel: discord.abc.Messageable):
 # ═════════════════════════════════════════════════════════════════════════════
 
 _FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-_CALENDAR_CHANNEL = "jarvis-calendar"
 _FREE_ANALYSIS_CATEGORY = "FREE ANALYSIS"
 
 # Keywords that should trigger live calendar context injection
@@ -4233,20 +4237,10 @@ async def _post_weekly_calendar():
     if not guild:
         return
 
-    # Find or create #jarvis-calendar in FREE ANALYSIS category
-    ch = discord.utils.get(guild.text_channels, name=_CALENDAR_CHANNEL)
+    ch = client.get_channel(JARVIS_CALENDAR_CHANNEL_ID)
     if not ch:
-        cat = discord.utils.get(guild.categories, name=_FREE_ANALYSIS_CATEGORY)
-        try:
-            ch = await guild.create_text_channel(
-                _CALENDAR_CHANNEL,
-                category=cat,
-                topic="Weekly red-folder economic calendar — auto-posted every Sunday. 🍜",
-            )
-            jarvis_log.info(f"CALENDAR: Created #{_CALENDAR_CHANNEL}")
-        except Exception as exc:
-            jarvis_log.error(f"CALENDAR: Could not create #{_CALENDAR_CHANNEL}: {exc}")
-            return
+        jarvis_log.error(f"CALENDAR: Morning report channel (id {JARVIS_CALENDAR_CHANNEL_ID}) not found")
+        return
 
     events = await _fetch_ff_calendar()
     week_label = datetime.now(_ET).strftime("week of %B %d, %Y")
