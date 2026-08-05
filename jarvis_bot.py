@@ -31,6 +31,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GUILD_ID = 1513190467796336830
 RULES_CHANNEL_NAME = "rules"
 DAILY_CHANNEL_NAME = "watchlist"
+DAILY_LEVELS_CHANNEL_ID = 1513227109324296406  # daily-levels channel (name has emoji, use ID)
 WELCOME_CHANNEL_NAME = "welcome"
 VERIFY_EMOJI = "✅"
 FREE_MEMBER_ROLE = "Free Member"
@@ -1163,11 +1164,11 @@ async def daily_market_prep():
     guild = client.get_guild(GUILD_ID)
     if guild is None:
         return
-    channel = client.get_channel(JARVIS_CALENDAR_CHANNEL_ID)
+    channel = client.get_channel(DAILY_LEVELS_CHANNEL_ID)
     if channel is None:
         channel = discord.utils.get(guild.text_channels, name=DAILY_CHANNEL_NAME)
     if channel is None:
-        print(f"Morning report channel (id {JARVIS_CALENDAR_CHANNEL_ID}) not found for daily prep")
+        print(f"Daily levels channel (id {DAILY_LEVELS_CHANNEL_ID}) not found for daily prep")
         return
     try:
         messages = await asyncio.to_thread(build_market_prep)
@@ -1965,12 +1966,11 @@ async def _gen_content(prompt: str) -> str:
 _DAILY_LEVELS_FALLBACK = "market-talk"
 
 async def _send_content(channel_name: str, text: str) -> bool:
-    """Post text to a channel by name, falling back to #market-talk for #daily-levels."""
+    """Post text to a channel by name, resolving daily-levels by ID."""
     guild = client.get_guild(GUILD_ID)
-    ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
-    if not ch and channel_name == "daily-levels":
-        jarvis_log.warning(f"#daily-levels not found — falling back to #{_DAILY_LEVELS_FALLBACK}")
-        channel_name = _DAILY_LEVELS_FALLBACK
+    if channel_name == "daily-levels":
+        ch = client.get_channel(DAILY_LEVELS_CHANNEL_ID)
+    else:
         ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
     if not ch:
         jarvis_log.error(f"Channel #{channel_name} not found — cannot post")
@@ -2153,7 +2153,8 @@ async def _request_approval(content: str, slot: dict):
         description=content,
         color=discord.Color.orange(),
     )
-    embed.add_field(name="Target", value=f"#{slot['target']}", inline=True)
+    _target_display = f"<#{DAILY_LEVELS_CHANNEL_ID}>" if slot["target"] == "daily-levels" else f"#{slot['target']}"
+    embed.add_field(name="Target", value=_target_display, inline=True)
     embed.add_field(name="Scheduled", value=now, inline=True)
     embed.add_field(name="Slot", value=slot["name"], inline=True)
     embed.set_footer(text="Auto-posts in 45 min if no action taken.")
