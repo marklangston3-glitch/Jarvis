@@ -4492,6 +4492,88 @@ async def on_ready():
             jarvis_log.error(f"SCOREBOARD: role setup error: {exc}")
     print("[Scoreboard] /scoreboard registered, consistency role ready.")
 
+# ═════════════════════════════════════════════════════════════════════════════
+# /crown — manual crown + reset command (Admin / Co-founder only)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@_slash_tree.command(
+    name="crown",
+    description="Crown this week's winner, post the leaderboard, and start a fresh week (Admin only)",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(
+    action="end_week = crown winner & reset · start_week = open a fresh week now · status = show current week info",
+)
+@_app_commands.choices(action=[
+    _app_commands.Choice(name="end_week",   value="end_week"),
+    _app_commands.Choice(name="start_week", value="start_week"),
+    _app_commands.Choice(name="status",     value="status"),
+])
+async def _cmd_crown(
+    interaction: discord.Interaction,
+    action: _app_commands.Choice[str],
+):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names and not _is_cofounder(interaction.user):
+        await interaction.response.send_message("❌ Admin or Co-founder only.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    act = action.value
+
+    if act == "status":
+        data       = _pnl_load()
+        entries    = data.get("entries", [])
+        week_start = data.get("week_start", "unknown")
+        traders    = len({e["user_id"] for e in entries})
+        trades     = len(entries)
+        await interaction.followup.send(
+            f"📊 **Current Week Status**\n"
+            f"Week started: **{week_start}**\n"
+            f"Traders logged: **{traders}**\n"
+            f"Total trade entries: **{trades}**\n\n"
+            f"Use `/crown end_week` to crown the winner and reset.\n"
+            f"Use `/crown start_week` to open a new week without crowning.",
+            ephemeral=True,
+        )
+        return
+
+    if act == "start_week":
+        data = _pnl_load()
+        data["entries"]    = []
+        data["week_start"] = str(_date.today())
+        _pnl_save(data)
+        await interaction.followup.send(
+            f"✅ Fresh week started — scoreboard wiped, clock starts now ({_date.today()}). "
+            f"Members can start logging trades with `/pnl`. 🍜",
+            ephemeral=True,
+        )
+        jarvis_log.info(f"CROWN: Manual start_week by {interaction.user.display_name}")
+        return
+
+    # act == "end_week"
+    data    = _pnl_load()
+    entries = data.get("entries", [])
+
+    await interaction.followup.send(
+        f"👑 Running the leaderboard, crowning the winner, and resetting the scoreboard…\n"
+        f"({len(entries)} trade{'s' if len(entries) != 1 else ''} logged this week)",
+        ephemeral=True,
+    )
+
+    try:
+        await _crown_top_trader()
+        await interaction.followup.send(
+            "✅ Done — leaderboard posted in #wins, crown transferred, scoreboard reset. 🍜",
+            ephemeral=True,
+        )
+        jarvis_log.info(f"CROWN: Manual end_week triggered by {interaction.user.display_name}")
+    except Exception as exc:
+        import traceback as _tb
+        jarvis_log.error(f"CROWN: Manual end_week error: {exc}\n{_tb.format_exc()}")
+        await interaction.followup.send(f"❌ Crown failed: {exc}", ephemeral=True)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PAID WALL INFRASTRUCTURE
