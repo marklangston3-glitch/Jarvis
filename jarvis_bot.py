@@ -1888,6 +1888,22 @@ _SLOTS = [
         ),
     },
     {
+        "name": "trivia_poll_tue",
+        "weekdays": [1],  # Tuesday
+        "hour": 12, "minute": 0,
+        "target": "market-talk",
+        "approval": False,
+        "trivia": True,
+    },
+    {
+        "name": "trivia_poll_thu",
+        "weekdays": [3],  # Thursday
+        "hour": 18, "minute": 0,
+        "target": "market-talk",
+        "approval": False,
+        "trivia": True,
+    },
+    {
         "name": "kitchen_fundamentals",
         "weekdays": [0],  # Monday only
         "hour": 10, "minute": 0,
@@ -2176,6 +2192,11 @@ async def _request_approval(content: str, slot: dict):
 async def _fire_slot(slot: dict):
     now_str = datetime.now(_ET).strftime("%I:%M %p ET")
     jarvis_log.info(f"SLOT: {slot['name']} firing at {now_str}")
+
+    if slot.get("trivia"):
+        await _fire_trivia_poll(slot["target"])
+        return
+
     content = await _gen_content(slot["prompt"])
     jarvis_log.info(f"CONTENT [{slot['name']}]: {content[:80]}...")
 
@@ -4058,6 +4079,110 @@ async def _ai_generate_poll(topic: str, channel: discord.abc.Messageable):
         return
 
     await _post_poll(channel, question, parsed, 24)
+
+
+_TRIVIA_PROMPT = (
+    "You are Jarvis for The Soup Kitchen trading Discord. "
+    "Generate ONE controversial debate question that has no clearly correct answer — "
+    "the kind that divides the room and sparks genuine argument. "
+    "Examples: 'Is a hotdog a sandwich?', 'How many holes does a straw have?', "
+    "'Is cereal a soup?', 'Is water wet?', 'Is a pop-tart a calzone?', "
+    "'Could you beat 10 kindergarteners in a fight?', 'Is a cloud a solid liquid or gas?', "
+    "'Is a taco a sandwich?', 'Does pineapple belong on pizza?', 'Is GIF pronounced gif or jif?'. "
+    "Topics: food logic, shower thoughts, everyday paradoxes, silly hypotheticals — NOT trading or finance. "
+    "Then provide 2-4 short answer options that represent the real debate sides. "
+    "Reply in this EXACT format:\n"
+    "QUESTION: <the debate question>\n"
+    "OPTIONS: <option 1> | <option 2> | <option 3>"
+)
+
+
+async def _fire_trivia_poll(channel_name: str):
+    """Ask Claude to generate a controversial trivia poll and post it."""
+    if not claude_async_client:
+        jarvis_log.error("TRIVIA: No AI client — cannot generate trivia poll")
+        return
+    guild = client.get_guild(GUILD_ID)
+    ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
+    if not ch:
+        jarvis_log.error(f"TRIVIA: Channel #{channel_name} not found")
+        return
+    try:
+        now_et = datetime.now(_ET)
+        live_ctx = f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}."
+        resp = await claude_async_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_TRIVIA_PROMPT + live_ctx,
+            messages=[{"role": "user", "content": "Generate a controversial trivia poll now."}],
+        )
+        raw = resp.content[0].text.strip()
+        question, options = None, []
+        for line in raw.splitlines():
+            if line.upper().startswith("QUESTION:"):
+                question = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("OPTIONS:"):
+                options = [o.strip() for o in line.split(":", 1)[1].split("|") if o.strip()]
+        if not question or len(options) < 2:
+            jarvis_log.error(f"TRIVIA: Bad AI response — {raw[:200]}")
+            return
+        await _post_poll(ch, question, options, duration_hours=48)
+        jarvis_log.info(f"TRIVIA: Poll posted — '{question}' ({len(options)} options)")
+    except Exception as exc:
+        import traceback as _tb
+        jarvis_log.error(f"TRIVIA: Error generating poll: {exc}\n{_tb.format_exc()}")
+
+
+# ─── /trivia-poll — fire a trivia poll on demand ─────────────────────────────
+@_slash_tree.command(
+    name="trivia-poll",
+    description="Drop a controversial trivia poll in any channel right now (Admin / Mod only)",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(
+    channel="Channel to post the poll in (defaults to current channel)",
+)
+async def _cmd_trivia_poll(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel | None = None,
+):
+    role_names = {r.name for r in interaction.user.roles}
+    if not (role_names & {"Admin", "Moderator"}) and not _is_cofounder(interaction.user):
+        await interaction.response.send_message("❌ Admin or Moderator only.", ephemeral=True)
+        return
+
+    target = channel or interaction.channel
+    await interaction.response.send_message(
+        f"🎲 Generating trivia poll for {target.mention}…", ephemeral=True
+    )
+
+    if not claude_async_client:
+        await interaction.followup.send("❌ AI client not configured.", ephemeral=True)
+        return
+    try:
+        now_et = datetime.now(_ET)
+        live_ctx = f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}."
+        resp = await claude_async_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_TRIVIA_PROMPT + live_ctx,
+            messages=[{"role": "user", "content": "Generate a controversial trivia poll now."}],
+        )
+        raw = resp.content[0].text.strip()
+        question, options = None, []
+        for line in raw.splitlines():
+            if line.upper().startswith("QUESTION:"):
+                question = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("OPTIONS:"):
+                options = [o.strip() for o in line.split(":", 1)[1].split("|") if o.strip()]
+        if not question or len(options) < 2:
+            await interaction.followup.send(f"❌ Bad AI response:\n```{raw[:500]}```", ephemeral=True)
+            return
+        await _post_poll(target, question, options, duration_hours=48)
+        await interaction.followup.send(f"✅ Trivia poll posted in {target.mention}! 🎲", ephemeral=True)
+        jarvis_log.info(f"TRIVIA: /trivia-poll fired by {interaction.user.display_name} in #{target.name}")
+    except Exception as exc:
+        await interaction.followup.send(f"❌ Error: {exc}", ephemeral=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
