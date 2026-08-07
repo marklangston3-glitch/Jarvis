@@ -1267,11 +1267,16 @@ async def get_ai_response(user_message, username, role_names=None):
     if claude_async_client is None:
         return "🍜 AI responses aren't configured yet. Try `@Jarvis help` for available commands."
     role_context = f" (roles: {', '.join(role_names)})" if role_names else ""
+    now_et = datetime.now(_ET)
+    live_context = (
+        f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}. "
+        f"Market status: {'OPEN' if (now_et.weekday() < 5 and 9 <= now_et.hour < 16) else 'CLOSED'}."
+    )
     try:
         response = await claude_async_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=600,
-            system=SYSTEM_PROMPT,
+            system=SYSTEM_PROMPT + live_context,
             messages=[
                 {"role": "user", "content": f"{username}{role_context} says: {user_message}"}
             ],
@@ -3434,12 +3439,17 @@ async def _get_indicator_ai_response(question: str, username: str) -> str:
     """Call Claude with the indicator system prompt."""
     if not claude_client:
         return "AI is offline right now — check back soon. 🍜"
+    now_et = datetime.now(_ET)
+    live_context = (
+        f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}. "
+        f"Market status: {'OPEN' if (now_et.weekday() < 5 and 9 <= now_et.hour < 16) else 'CLOSED'}."
+    )
     try:
         def _call():
             return claude_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=400,
-                system=_INDICATOR_SYSTEM_PROMPT,
+                system=_INDICATOR_SYSTEM_PROMPT + live_context,
                 messages=[{"role": "user", "content": f"{username} asks: {question}"}],
             )
         resp = await asyncio.to_thread(_call)
