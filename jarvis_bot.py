@@ -5778,5 +5778,85 @@ async def on_ready():
         _sweep_new_member_role.start()
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  AUTO-VERIFY  —  kill the react-to-#rules friction
+#  New members get "Free Member" automatically, two ways:
+#    1) the moment they send their first message, OR
+#    2) after a short timer (catches lurkers who never post)
+#  Also strips the "Unverified" role so they graduate out of strict automod.
+#  The old ✅-in-#rules path still works — this is additive, not a replacement.
+# ═════════════════════════════════════════════════════════════════════════════
+
+AUTO_VERIFY_MINUTES = 3
+
+
+async def _auto_verify(member, reason):
+    if member.bot:
+        return
+    guild = member.guild
+    free = discord.utils.get(guild.roles, name=FREE_MEMBER_ROLE)
+    if free is None or free in member.roles:
+        return  # role missing, or already verified — nothing to do
+    unv = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+    try:
+        await member.add_roles(free, reason=f"Auto-verify ({reason})")
+        if unv and unv in member.roles:
+            await member.remove_roles(unv, reason=f"Auto-verify ({reason})")
+        jarvis_log.info(f"AUTO-VERIFY ({reason}): {member.display_name}")
+        try:
+            await member.send(WELCOME_DM)
+        except Exception:
+            pass  # DMs closed — fine, they're still verified
+    except discord.Forbidden:
+        jarvis_log.error("AUTO-VERIFY: missing Manage Roles or role hierarchy too low")
+
+
+# ── Trigger 1: first message anywhere ────────────────────────────────────────
+_prev_on_message_autoverify = client.on_message
+
+@client.event
+async def on_message(message):
+    try:
+        await _prev_on_message_autoverify(message)   # keep automod + AI handlers
+    except Exception as exc:
+        jarvis_log.error(f"on_message auto-verify chain error: {exc}")
+    if (message.guild and message.guild.id == GUILD_ID
+            and not message.author.bot
+            and hasattr(message.author, "roles")):
+        free = discord.utils.get(message.guild.roles, name=FREE_MEMBER_ROLE)
+        if free and free not in message.author.roles:
+            await _auto_verify(message.author, "first message")
+
+
+# ── Trigger 2: timed sweep (catches lurkers who never post) ──────────────────
+@tasks.loop(minutes=2)
+async def _auto_verify_sweep():
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    unv = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+    if not unv:
+        return
+    cutoff = datetime.now(_ET) - timedelta(minutes=AUTO_VERIFY_MINUTES)
+    for member in list(unv.members):
+        if member.joined_at and member.joined_at < cutoff:
+            await _auto_verify(member, f"{AUTO_VERIFY_MINUTES}-min timer")
+
+@_auto_verify_sweep.before_loop
+async def _before_auto_verify_sweep():
+    await client.wait_until_ready()
+
+_prev_on_ready_autoverify = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_autoverify()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready auto-verify chain error: {exc}")
+    if not _auto_verify_sweep.is_running():
+        _auto_verify_sweep.start()
+
+
 if __name__ == "__main__":
     client.run(BOT_TOKEN)
