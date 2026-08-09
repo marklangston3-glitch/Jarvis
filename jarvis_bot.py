@@ -2639,7 +2639,7 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
 
     now_str = datetime.now(_ET).strftime("%I:%M %p ET")
     body = (
-        f"@everyone\n"
+        f"<@&1535990201992618096>\n"
         f"📊 **CHART: UNLABELED — update TradingView webhook URL**\n"
         f"🔔 **TRADINGVIEW ALERT — ${ticker}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2654,14 +2654,6 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
         guild = client.get_guild(GUILD_ID)
         if not guild:
             return
-
-        # Check if Jarvis has Mention Everyone permission — log warning if not
-        me = guild.me
-        if me and not me.guild_permissions.mention_everyone:
-            jarvis_log.warning(
-                "PERMISSION WARNING: Jarvis does not have 'Mention @everyone' permission. "
-                "@everyone ping will not fire until this is granted in Server Settings → Roles → Jarvis."
-            )
 
         # Find or create #marky-alerts in the paid alerts category
         ch = discord.utils.get(guild.text_channels, name="marky-alerts")
@@ -2679,9 +2671,10 @@ async def _handle_tv_webhook(request: _aiohttp_web.Request) -> _aiohttp_web.Resp
                 ch = _ch(guild, _LIVE_CALLS_CHANNEL)  # fallback
         if not ch:
             return
+        alert_body = body.replace("@everyone", "<@&1535990201992618096>")
         msg = await ch.send(
-            body,
-            allowed_mentions=discord.AllowedMentions(everyone=True),
+            alert_body,
+            allowed_mentions=discord.AllowedMentions(roles=True),
         )
         try:
             await msg.create_thread(name=f"${ticker} Alert Discussion")
@@ -3559,7 +3552,7 @@ def _make_tf_handler(tf_label: str):
         }
         header_line = _tf_header_map.get(tf_label, f"📊 **{tf_label}**") if tf_label else ""
 
-        body = f"@everyone\n"
+        body = f"<@&1535990201992618096>\n"
         if header_line:
             body += f"{header_line}\n"
         body += (
@@ -3576,9 +3569,6 @@ def _make_tf_handler(tf_label: str):
             guild = client.get_guild(GUILD_ID)
             if not guild:
                 return
-            me = guild.me
-            if me and not me.guild_permissions.mention_everyone:
-                jarvis_log.warning("PERMISSION WARNING: Jarvis lacks 'Mention @everyone'")
             ch = discord.utils.get(guild.text_channels, name="marky-alerts")
             if not ch:
                 try:
@@ -3594,7 +3584,8 @@ def _make_tf_handler(tf_label: str):
                     ch = _ch(guild, _LIVE_CALLS_CHANNEL)
             if not ch:
                 return
-            msg = await ch.send(body, allowed_mentions=discord.AllowedMentions(everyone=True))
+            alert_body = body.replace("@everyone", "<@&1535990201992618096>")
+            msg = await ch.send(alert_body, allowed_mentions=discord.AllowedMentions(roles=True))
             try:
                 thread_name = f"${ticker} {tf_label.split(':')[1].strip().split(' ')[0] if tf_label else 'Alert'} Discussion"
                 await msg.create_thread(name=thread_name[:100])
