@@ -3629,6 +3629,53 @@ async def _start_webhook_server():
         print(f"[Webhook] Failed to start: {exc}")
 
 
+# ─── /test-signal — fire a fake alert to verify role mention + channel ───────
+
+@_slash_tree.command(
+    name="test-signal",
+    description="Fire a test indicator alert into #marky-alerts to verify the role ping works (Admin only)",
+)
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_test_signal(interaction: discord.Interaction):
+    role_names = {r.name for r in interaction.user.roles}
+    if "Admin" not in role_names and not _is_cofounder(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    ch = discord.utils.get(guild.text_channels, name="marky-alerts")
+    if not ch:
+        await interaction.followup.send("❌ #marky-alerts not found.", ephemeral=True)
+        return
+
+    now_str = datetime.now(_ET).strftime("%I:%M %p ET")
+    body = (
+        f"<@&1535990201992618096>\n"
+        f"⚡ **1m: LONG SIGNAL**\n"
+        f"🔔 **TEST ALERT — $SPY**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Action: BUY triggered at $999.99\n"
+        f"Message: This is a test signal from Jarvis — confirming role ping works. 🍜\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {now_str}"
+    )
+    try:
+        msg = await ch.send(body, allowed_mentions=discord.AllowedMentions(roles=True))
+        try:
+            await msg.create_thread(name="$SPY Test Signal Discussion")
+        except Exception:
+            pass
+        await interaction.followup.send(
+            f"✅ Test signal posted in {ch.mention} — check if the role was pinged correctly. 🍜",
+            ephemeral=True,
+        )
+        jarvis_log.info(f"TEST SIGNAL: fired by {interaction.user.display_name}")
+    except Exception as exc:
+        await interaction.followup.send(f"❌ Failed: {exc}", ephemeral=True)
+
+
 # ─── FEATURE B: /indicator slash command ─────────────────────────────────────
 
 @_slash_tree.command(name="indicator", description="Langston Volatility Capture — setup guide and alert URLs")
