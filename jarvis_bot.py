@@ -10,6 +10,7 @@ Features:
 """
 
 import asyncio
+import io
 import os
 import re
 from datetime import datetime, time, timedelta
@@ -5856,6 +5857,277 @@ async def on_ready():
         jarvis_log.error(f"on_ready auto-verify chain error: {exc}")
     if not _auto_verify_sweep.is_running():
         _auto_verify_sweep.start()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  SUPPORT TICKET SYSTEM  (fully functional, persistent)
+#
+#  /ticket-panel  → (Admin) posts "Open a Ticket" button in a channel
+#  [Open a Ticket] → creates private #ticket-<user> channel, pings support,
+#                    notifies the log channel
+#  [Close Ticket] / /close → saves transcript to log channel, deletes ticket
+#  /ticket-add @user → (support) add another member to the current ticket
+#
+#  Transcripts + alerts → channel 1539460281607131247
+# ═════════════════════════════════════════════════════════════════════════════
+
+TICKET_LOG_CHANNEL_ID = 1539460281607131247
+TICKET_CATEGORY_NAME  = "Tickets"
+SUPPORT_ROLE_NAMES    = ("Admin", "Moderator")
+_TICKET_GOLD = 0xD4A02A
+
+
+def _is_support(member) -> bool:
+    if not hasattr(member, "roles"):
+        return False
+    names = {r.name for r in member.roles}
+    return bool(names & set(SUPPORT_ROLE_NAMES)) or member.guild_permissions.manage_channels
+
+
+def _sanitize_ticket(name: str) -> str:
+    name = re.sub(r"[^a-z0-9\-]", "", name.lower().replace(" ", "-"))
+    return (name or "user")[:90]
+
+
+def _find_open_ticket(guild, user_id):
+    for ch in guild.text_channels:
+        if ch.category and ch.category.name == TICKET_CATEGORY_NAME and ch.topic == str(user_id):
+            return ch
+    return None
+
+
+async def _ensure_ticket_category(guild):
+    cat = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
+    if cat is None:
+        try:
+            cat = await guild.create_category(TICKET_CATEGORY_NAME, reason="Ticket system")
+        except discord.Forbidden:
+            jarvis_log.error("TICKETS: missing Manage Channels to create category")
+            return None
+    return cat
+
+
+async def _build_transcript(channel) -> discord.File:
+    lines = [f"Transcript — #{channel.name}",
+             f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+             "=" * 50, ""]
+    async for msg in channel.history(limit=1000, oldest_first=True):
+        stamp = msg.created_at.strftime("%Y-%m-%d %H:%M")
+        content = msg.content or ""
+        if msg.attachments:
+            content += "  [attachments: " + ", ".join(a.url for a in msg.attachments) + "]"
+        if msg.embeds and not content:
+            content = "[embed]"
+        lines.append(f"[{stamp}] {msg.author.display_name}: {content}")
+    data = io.BytesIO("\n".join(lines).encode("utf-8"))
+    return discord.File(data, filename=f"transcript-{channel.name}.txt")
+
+
+async def _ticket_log_channel(guild):
+    ch = guild.get_channel(TICKET_LOG_CHANNEL_ID) or client.get_channel(TICKET_LOG_CHANNEL_ID)
+    if ch is None:
+        try:
+            ch = await client.fetch_channel(TICKET_LOG_CHANNEL_ID)
+        except Exception as exc:
+            jarvis_log.error(f"TICKETS: log channel {TICKET_LOG_CHANNEL_ID} not found: {exc}")
+    return ch
+
+
+async def _create_ticket(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild  = interaction.guild
+    opener = interaction.user
+
+    existing = _find_open_ticket(guild, opener.id)
+    if existing:
+        await interaction.followup.send(f"You already have an open ticket: {existing.mention}", ephemeral=True)
+        return
+
+    cat = await _ensure_ticket_category(guild)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        opener: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                            read_message_history=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                              manage_channels=True, read_message_history=True),
+    }
+    support_mentions = []
+    for rname in SUPPORT_ROLE_NAMES:
+        r = discord.utils.get(guild.roles, name=rname)
+        if r:
+            overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                        read_message_history=True, manage_messages=True)
+            support_mentions.append(r.mention)
+
+    try:
+        ch = await guild.create_text_channel(
+            name=f"ticket-{_sanitize_ticket(opener.name)}",
+            category=cat,
+            topic=str(opener.id),
+            overwrites=overwrites,
+            reason=f"Support ticket for {opener}",
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I couldn't create a ticket channel — I'm missing **Manage Channels**. Ping an admin.",
+            ephemeral=True,
+        )
+        jarvis_log.error("TICKETS: missing Manage Channels to create ticket")
+        return
+
+    embed = discord.Embed(
+        title="🎫 Support Ticket",
+        description=(f"Hey {opener.mention} — thanks for reaching out. 🍜\n\n"
+                     "Tell us what you need help with and a team member will be with you shortly. "
+                     "Include as much detail as you can (screenshots welcome).\n\n"
+                     "When you're done, tap **Close Ticket** below."),
+        color=_TICKET_GOLD,
+    )
+    embed.set_footer(text="The Soup Kitchen · Support")
+    ping = f"{opener.mention} " + " ".join(support_mentions)
+    await ch.send(content=ping, embed=embed, view=CloseTicketView())
+
+    log = await _ticket_log_channel(guild)
+    if log:
+        alert = discord.Embed(
+            title="🎫 New ticket opened",
+            description=f"**By:** {opener.mention} (`{opener}`)\n**Channel:** {ch.mention}",
+            color=_TICKET_GOLD,
+            timestamp=datetime.utcnow(),
+        )
+        await log.send(embed=alert)
+
+    await interaction.followup.send(f"✅ Your ticket is open: {ch.mention}", ephemeral=True)
+    jarvis_log.info(f"TICKETS: opened for {opener} -> #{ch.name}")
+
+
+async def _do_close(interaction: discord.Interaction):
+    channel = interaction.channel
+    guild   = interaction.guild
+    if not (channel.category and channel.category.name == TICKET_CATEGORY_NAME and channel.topic):
+        await interaction.response.send_message("This isn't a ticket channel.", ephemeral=True)
+        return
+    if not (_is_support(interaction.user) or str(interaction.user.id) == channel.topic):
+        await interaction.response.send_message("Only the ticket owner or support can close this.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("🔒 Closing this ticket and saving the transcript…")
+
+    log = await _ticket_log_channel(guild)
+    if log:
+        try:
+            transcript = await _build_transcript(channel)
+            opener_id  = channel.topic
+            opener     = guild.get_member(int(opener_id)) if opener_id.isdigit() else None
+            summary = discord.Embed(
+                title="🎫 Ticket closed",
+                description=(f"**Ticket:** #{channel.name}\n"
+                             f"**Opened by:** {opener.mention if opener else opener_id}\n"
+                             f"**Closed by:** {interaction.user.mention}"),
+                color=_TICKET_GOLD,
+                timestamp=datetime.utcnow(),
+            )
+            await log.send(embed=summary, file=transcript)
+        except Exception as exc:
+            jarvis_log.error(f"TICKETS: transcript failed: {exc}")
+
+    await asyncio.sleep(4)
+    try:
+        await channel.delete(reason=f"Ticket closed by {interaction.user}")
+        jarvis_log.info(f"TICKETS: closed #{channel.name} by {interaction.user}")
+    except discord.Forbidden:
+        jarvis_log.error("TICKETS: missing Manage Channels to delete ticket")
+
+
+class OpenTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Open a Ticket", style=discord.ButtonStyle.primary,
+                       emoji="🎫", custom_id="jarvis_ticket_open")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _create_ticket(interaction)
+
+
+class ConfirmCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="Confirm close", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _do_close(interaction)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled — ticket stays open.", view=None)
+
+
+class CloseTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger,
+                       emoji="🔒", custom_id="jarvis_ticket_close")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Are you sure you want to close this ticket?",
+            view=ConfirmCloseView(), ephemeral=True,
+        )
+
+
+@_slash_tree.command(name="ticket-panel", description="Post the 'Open a Ticket' panel here (Admin)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_ticket_panel(interaction: discord.Interaction):
+    if not _is_support(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title="🎫 Need help? Open a ticket",
+        description=("Got a question, a payment issue, or need indicator access sorted? "
+                     "Tap the button below and a private channel opens just for you and the team.\n\n"
+                     "*The Soup Kitchen · Support* 🍜👑"),
+        color=_TICKET_GOLD,
+    )
+    await interaction.channel.send(embed=embed, view=OpenTicketView())
+    await interaction.response.send_message("✅ Panel posted.", ephemeral=True)
+
+
+@_slash_tree.command(name="close", description="Close the current ticket")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+async def _cmd_close(interaction: discord.Interaction):
+    await _do_close(interaction)
+
+
+@_slash_tree.command(name="ticket-add", description="Add a member to this ticket (support)")
+@_app_commands.guilds(discord.Object(id=GUILD_ID))
+@_app_commands.describe(member="Who to add to this ticket")
+async def _cmd_ticket_add(interaction: discord.Interaction, member: discord.Member):
+    channel = interaction.channel
+    if not (channel.category and channel.category.name == TICKET_CATEGORY_NAME and channel.topic):
+        await interaction.response.send_message("This isn't a ticket channel.", ephemeral=True)
+        return
+    if not _is_support(interaction.user):
+        await interaction.response.send_message("❌ Support only.", ephemeral=True)
+        return
+    await channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+    await interaction.response.send_message(f"✅ Added {member.mention} to the ticket.")
+
+
+_prev_on_ready_tickets = client.on_ready
+
+@client.event
+async def on_ready():
+    try:
+        await _prev_on_ready_tickets()
+    except Exception as exc:
+        jarvis_log.error(f"on_ready tickets chain error: {exc}")
+    try:
+        client.add_view(OpenTicketView())
+        client.add_view(CloseTicketView())
+        jarvis_log.info("TICKETS: persistent views registered")
+    except Exception as exc:
+        jarvis_log.error(f"TICKETS: add_view failed: {exc}")
 
 
 if __name__ == "__main__":
