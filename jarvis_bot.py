@@ -4120,7 +4120,33 @@ async def _ai_generate_poll(topic: str, channel: discord.abc.Messageable):
     await _post_poll(channel, question, parsed, 24)
 
 
-_TRIVIA_PROMPT = (
+_TRIVIA_HISTORY_FILE = os.path.join(DATA_DIR, "trivia_history.json")
+_TRIVIA_HISTORY_MAX  = 50   # how many past questions to remember
+
+
+def _trivia_history_load() -> list:
+    try:
+        with open(_TRIVIA_HISTORY_FILE) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return []
+
+
+def _trivia_history_save(questions: list):
+    tmp = _TRIVIA_HISTORY_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(questions[-_TRIVIA_HISTORY_MAX:], f, indent=2)
+    os.replace(tmp, _TRIVIA_HISTORY_FILE)
+
+
+def _trivia_history_append(question: str):
+    history = _trivia_history_load()
+    if question not in history:
+        history.append(question)
+    _trivia_history_save(history)
+
+
+_TRIVIA_PROMPT_BASE = (
     "You are Jarvis for The Soup Kitchen trading Discord. "
     "Generate ONE controversial debate question that has no clearly correct answer — "
     "the kind that divides the room and sparks genuine argument. "
@@ -4129,6 +4155,8 @@ _TRIVIA_PROMPT = (
     "'Could you beat 10 kindergarteners in a fight?', 'Is a cloud a solid liquid or gas?', "
     "'Is a taco a sandwich?', 'Does pineapple belong on pizza?', 'Is GIF pronounced gif or jif?'. "
     "Topics: food logic, shower thoughts, everyday paradoxes, silly hypotheticals — NOT trading or finance. "
+    "IMPORTANT: You must NOT repeat any question from the list of already-used questions below. "
+    "Make it completely different in topic and wording. "
     "Then provide 2-4 short answer options that represent the real debate sides. "
     "Reply in this EXACT format:\n"
     "QUESTION: <the debate question>\n"
@@ -4136,37 +4164,52 @@ _TRIVIA_PROMPT = (
 )
 
 
-async def _fire_trivia_poll(channel_name: str):
-    """Ask Claude to generate a controversial trivia poll and post it."""
+def _build_trivia_prompt() -> str:
+    history = _trivia_history_load()
+    prompt = _TRIVIA_PROMPT_BASE
+    if history:
+        used = "\n".join(f"- {q}" for q in history[-30:])
+        prompt += f"\n\nALREADY USED (do NOT repeat these):\n{used}"
+    return prompt
+
+
+async def _run_trivia_poll(ch: discord.TextChannel):
+    """Core logic: generate a unique trivia poll and post it to ch."""
     if not claude_async_client:
-        jarvis_log.error("TRIVIA: No AI client — cannot generate trivia poll")
+        jarvis_log.error("TRIVIA: No AI client")
         return
+    now_et = datetime.now(_ET)
+    live_ctx = f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}."
+    resp = await claude_async_client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=200,
+        system=_build_trivia_prompt() + live_ctx,
+        messages=[{"role": "user", "content": "Generate a unique controversial trivia poll now."}],
+    )
+    raw = resp.content[0].text.strip()
+    question, options = None, []
+    for line in raw.splitlines():
+        if line.upper().startswith("QUESTION:"):
+            question = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("OPTIONS:"):
+            options = [o.strip() for o in line.split(":", 1)[1].split("|") if o.strip()]
+    if not question or len(options) < 2:
+        jarvis_log.error(f"TRIVIA: Bad AI response — {raw[:200]}")
+        return
+    await _post_poll(ch, question, options, duration_hours=48)
+    _trivia_history_append(question)
+    jarvis_log.info(f"TRIVIA: Poll posted — '{question}' ({len(options)} options, {len(_trivia_history_load())} in history)")
+
+
+async def _fire_trivia_poll(channel_name: str):
+    """Scheduled slot entry point."""
     guild = client.get_guild(GUILD_ID)
     ch = guild and discord.utils.get(guild.text_channels, name=channel_name)
     if not ch:
         jarvis_log.error(f"TRIVIA: Channel #{channel_name} not found")
         return
     try:
-        now_et = datetime.now(_ET)
-        live_ctx = f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}."
-        resp = await claude_async_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=200,
-            system=_TRIVIA_PROMPT + live_ctx,
-            messages=[{"role": "user", "content": "Generate a controversial trivia poll now."}],
-        )
-        raw = resp.content[0].text.strip()
-        question, options = None, []
-        for line in raw.splitlines():
-            if line.upper().startswith("QUESTION:"):
-                question = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("OPTIONS:"):
-                options = [o.strip() for o in line.split(":", 1)[1].split("|") if o.strip()]
-        if not question or len(options) < 2:
-            jarvis_log.error(f"TRIVIA: Bad AI response — {raw[:200]}")
-            return
-        await _post_poll(ch, question, options, duration_hours=48)
-        jarvis_log.info(f"TRIVIA: Poll posted — '{question}' ({len(options)} options)")
+        await _run_trivia_poll(ch)
     except Exception as exc:
         import traceback as _tb
         jarvis_log.error(f"TRIVIA: Error generating poll: {exc}\n{_tb.format_exc()}")
@@ -4199,25 +4242,7 @@ async def _cmd_trivia_poll(
         await interaction.followup.send("❌ AI client not configured.", ephemeral=True)
         return
     try:
-        now_et = datetime.now(_ET)
-        live_ctx = f"\n\nCURRENT TIME: {now_et.strftime('%I:%M %p ET, %A, %B %d, %Y')}."
-        resp = await claude_async_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=200,
-            system=_TRIVIA_PROMPT + live_ctx,
-            messages=[{"role": "user", "content": "Generate a controversial trivia poll now."}],
-        )
-        raw = resp.content[0].text.strip()
-        question, options = None, []
-        for line in raw.splitlines():
-            if line.upper().startswith("QUESTION:"):
-                question = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("OPTIONS:"):
-                options = [o.strip() for o in line.split(":", 1)[1].split("|") if o.strip()]
-        if not question or len(options) < 2:
-            await interaction.followup.send(f"❌ Bad AI response:\n```{raw[:500]}```", ephemeral=True)
-            return
-        await _post_poll(target, question, options, duration_hours=48)
+        await _run_trivia_poll(target)
         await interaction.followup.send(f"✅ Trivia poll posted in {target.mention}! 🎲", ephemeral=True)
         jarvis_log.info(f"TRIVIA: /trivia-poll fired by {interaction.user.display_name} in #{target.name}")
     except Exception as exc:
