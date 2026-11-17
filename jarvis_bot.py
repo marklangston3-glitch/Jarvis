@@ -2234,7 +2234,14 @@ def _start_content_scheduler():
     _DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     lines = [f"{'NAME':<26} {'TIME (ET)':<10} {'DAYS':<15} {'TARGET':<20} TYPE"]
     lines.append("─" * 80)
-    for slot in _SLOTS:
+    # Every slot is a Claude call. They're off unless JARVIS_AI_SLOTS=on (Railway → Variables), to cut API
+    # spend (Nov 2026). Data-only posts (9 am market prep, news scanner) and @Jarvis replies are unaffected,
+    # and "@Jarvis testpost <slot>" still fires any slot by hand.
+    ai_slots_on = os.environ.get("JARVIS_AI_SLOTS", "off").lower() in ("on", "1", "true")
+    if not ai_slots_on:
+        jarvis_log.info("Scheduled AI content slots are OFF (set JARVIS_AI_SLOTS=on to re-enable)")
+        print("[Content] Scheduled AI content slots are OFF (JARVIS_AI_SLOTS != on)")
+    for slot in (_SLOTS if ai_slots_on else []):
         _schedule.every(1).minutes.do(_make_job(slot)).tag("content")
         days = "/".join(_DAY[d] for d in slot["weekdays"])
         kind = "poll" if slot.get("poll") else ("approval" if slot.get("approval") else "direct")
@@ -2269,8 +2276,8 @@ async def on_ready():
     global _bot_loop
     _bot_loop = asyncio.get_event_loop()
     _start_content_scheduler()
-    jarvis_log.info(f"═══ Content system online — {len(_SLOTS)} slots registered ═══")
-    print(f"[Content] System online — {len(_SLOTS)} slots registered")
+    jarvis_log.info("═══ Content system online ═══")
+    print("[Content] System online")
 
 
 
